@@ -1,0 +1,21 @@
+
+// Development health check. Replace with a more restrictive check before production.
+\Illuminate\Support\Facades\Route::get('/health', function () {
+    try {
+        \Illuminate\Support\Facades\DB::select('SELECT 1');
+
+        return response()->json([
+            'service' => 'boardriders-api',
+            'status' => 'ok',
+            'database' => 'connected',
+        ]);
+    } catch (\Throwable $exception) {
+        report($exception);
+
+        return response()->json([
+            'service' => 'boardriders-api',
+            'status' => 'error',
+            'database' => 'unavailable',
+        ], 503);
+    }
+});
