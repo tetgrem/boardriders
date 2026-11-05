@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\CatalogController;
 use App\Http\Controllers\Api\ProductCatalogController;
 use App\Http\Controllers\Api\CartPreviewController;
 use App\Http\Controllers\Api\PromotionPreviewController;
+use App\Http\Controllers\Api\LoyaltyWalletPreviewController;
 
 
 Route::prefix('v1/catalog')->group(function () {
@@ -77,3 +78,7 @@ Route::prefix('v1/promotions')->group(function () {
     )->middleware('throttle:30,1');
 
 });
+
+// Read-only бонусний баланс: виключно для авторизованого користувача.
+Route::get('/v1/loyalty/wallet/preview', LoyaltyWalletPreviewController::class)
+    ->middleware(['auth:sanctum', 'throttle:60,1']);
