@@ -1,0 +1,612 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Services\Inventory\InventoryService;
+use DomainException;
+use Illuminate\Foundation\Testing\DatabaseTransactions;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+use InvalidArgumentException;
+use RuntimeException;
+use Tests\TestCase;
+
+class InventoryAdjustmentTest extends TestCase
+{
+    use DatabaseTransactions;
+
+    private InventoryService $inventory;
+
+    private int $warehouseId;
+    private int $variantId;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        if (
+            config('database.default') !== 'pgsql' ||
+            DB::connection()->getDatabaseName() !== 'boardriders_test'
+        ) {
+            throw new RuntimeException(
+                'Tests are allowed only in boardriders_test.'
+            );
+        }
+
+        $this->inventory = app(InventoryService::class);
+
+        $now = now();
+        $suffix = (string) Str::uuid();
+
+        $this->warehouseId = DB::table('warehouses')
+            ->insertGetId([
+                'code' => 'ADJ-WH-' . $suffix,
+                'name' => 'Тестовий склад інвентаризації',
+                'kind' => 'owned',
+                'country_code' => 'UA',
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+        $productId = DB::table('products')
+            ->insertGetId([
+                'status' => 'draft',
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+        $this->variantId = DB::table('product_variants')
+            ->insertGetId([
+                'product_id' => $productId,
+                'sku' => 'ADJ-SKU-' . $suffix,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+    }
+
+    /**
+     * 1. Недостача при инвентаризации.
+     */
+    public function test_stock_shortage_creates_negative_movement(): void
+    {
+        $stock = $this->inventory->receive(
+            $this->warehouseId,
+            $this->variantId,
+            10,
+            'ADJ-RECEIPT-001'
+        );
+
+        $key = (string) Str::uuid();
+
+        $adjustmentId = $this->inventory->reconcileStockCount(
+            $this->warehouseId,
+            $this->variantId,
+            7,
+            'STOCKTAKE-001',
+            $key,
+            'stocktake'
+        );
+
+        $this->assertGreaterThan(0, $adjustmentId);
+
+        $this->assertStock(7, 0);
+
+        $this->assertDatabaseHas('inventory_adjustments', [
+            'id' => $adjustmentId,
+            'inventory_stock_id' => $stock->id,
+            'previous_qty' => 10,
+            'counted_qty' => 7,
+            'quantity_delta' => -3,
+            'reason' => 'stocktake',
+            'reference' => 'STOCKTAKE-001',
+        ]);
+
+        $this->assertDatabaseHas('inventory_movements', [
+            'inventory_stock_id' => $stock->id,
+            'type' => 'adjustment',
+            'quantity_delta' => -3,
+            'reference' => 'ADJ-' . $key,
+        ]);
+
+        $this->assertSame(1, $this->movementCount($key));
+    }
+
+    /**
+     * 2. Излишки при инвентаризации.
+     */
+    public function test_stock_surplus_creates_positive_movement(): void
+    {
+        $this->inventory->receive(
+            $this->warehouseId,
+            $this->variantId,
+            2,
+            'ADJ-RECEIPT-002'
+        );
+
+        $key = (string) Str::uuid();
+
+        $adjustmentId = $this->inventory->reconcileStockCount(
+            $this->warehouseId,
+            $this->variantId,
+            5,
+            'STOCKTAKE-002',
+            $key,
+            'correction'
+        );
+
+        $this->assertStock(5, 0);
+
+        $this->assertDatabaseHas('inventory_adjustments', [
+            'id' => $adjustmentId,
+            'previous_qty' => 2,
+            'counted_qty' => 5,
+            'quantity_delta' => 3,
+            'reason' => 'correction',
+        ]);
+
+        $this->assertDatabaseHas('inventory_movements', [
+            'type' => 'adjustment',
+            'quantity_delta' => 3,
+            'reference' => 'ADJ-' . $key,
+        ]);
+
+        $this->assertSame(1, $this->movementCount($key));
+    }
+
+    /**
+     * 3. Остаток совпадает с подсчётом.
+     *
+     * Документ сохраняем, но движения не создаём.
+     */
+    public function test_unchanged_stock_has_no_movement(): void
+    {
+        $this->inventory->receive(
+            $this->warehouseId,
+            $this->variantId,
+            4,
+            'ADJ-RECEIPT-003'
+        );
+
+        $key = (string) Str::uuid();
+
+        $adjustmentId = $this->inventory->reconcileStockCount(
+            $this->warehouseId,
+            $this->variantId,
+            4,
+            'STOCKTAKE-003',
+            $key
+        );
+
+        $this->assertStock(4, 0);
+
+        $this->assertDatabaseHas('inventory_adjustments', [
+            'id' => $adjustmentId,
+            'previous_qty' => 4,
+            'counted_qty' => 4,
+            'quantity_delta' => 0,
+        ]);
+
+        $this->assertSame(1, $this->adjustmentCount($key));
+        $this->assertSame(0, $this->movementCount($key));
+    }
+
+    /**
+     * 4. Нельзя уменьшить физический остаток
+     * ниже зарезервированного количества.
+     */
+    public function test_cannot_adjust_below_reserved_quantity(): void
+    {
+        $this->inventory->receive(
+            $this->warehouseId,
+            $this->variantId,
+            10,
+            'ADJ-RECEIPT-004'
+        );
+
+        $this->inventory->reserveForOrder(
+            $this->warehouseId,
+            $this->variantId,
+            8,
+            'ADJ-ORDER-001',
+            (string) Str::uuid()
+        );
+
+        $key = (string) Str::uuid();
+
+        try {
+            $this->inventory->reconcileStockCount(
+                $this->warehouseId,
+                $this->variantId,
+                7,
+                'STOCKTAKE-004',
+                $key
+            );
+
+            $this->fail(
+                'Adjustment below reservation should fail.'
+            );
+        } catch (DomainException $exception) {
+            $this->assertStringContainsString(
+                'менший',
+                $exception->getMessage()
+            );
+        }
+
+        // Ошибка не должна менять склад.
+        $this->assertStock(10, 8);
+
+        // Не должно быть ни документа, ни движения.
+        $this->assertSame(0, $this->adjustmentCount($key));
+        $this->assertSame(0, $this->movementCount($key));
+    }
+
+    /**
+     * 5. Повторное выполнение одного документа
+     * не должно менять остаток второй раз.
+     */
+    public function test_adjustment_is_idempotent(): void
+    {
+        $this->inventory->receive(
+            $this->warehouseId,
+            $this->variantId,
+            10,
+            'ADJ-RECEIPT-005'
+        );
+
+        $key = (string) Str::uuid();
+
+        $firstId = $this->inventory->reconcileStockCount(
+            $this->warehouseId,
+            $this->variantId,
+            7,
+            'STOCKTAKE-005',
+            $key
+        );
+
+        $secondId = $this->inventory->reconcileStockCount(
+            $this->warehouseId,
+            $this->variantId,
+            7,
+            'STOCKTAKE-005',
+            $key
+        );
+
+        $this->assertSame($firstId, $secondId);
+
+        $this->assertStock(7, 0);
+
+        $this->assertSame(1, $this->adjustmentCount($key));
+        $this->assertSame(1, $this->movementCount($key));
+    }
+
+    /**
+     * 6. Один UUID нельзя использовать
+     * для двух разных корректировок.
+     */
+    public function test_adjustment_key_cannot_be_reused(): void
+    {
+        $this->inventory->receive(
+            $this->warehouseId,
+            $this->variantId,
+            10,
+            'ADJ-RECEIPT-006'
+        );
+
+        $key = (string) Str::uuid();
+
+        $this->inventory->reconcileStockCount(
+            $this->warehouseId,
+            $this->variantId,
+            9,
+            'STOCKTAKE-006',
+            $key
+        );
+
+        try {
+            $this->inventory->reconcileStockCount(
+                $this->warehouseId,
+                $this->variantId,
+                8,
+                'STOCKTAKE-006',
+                $key
+            );
+
+            $this->fail(
+                'Reuse of adjustment UUID should fail.'
+            );
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString(
+                'UUID коригування вже використано',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertStock(9, 0);
+
+        $this->assertSame(1, $this->adjustmentCount($key));
+        $this->assertSame(1, $this->movementCount($key));
+    }
+
+    /**
+     * 7. Первая инвентаризация на складе,
+     * где ещё нет записи остатка.
+     */
+    public function test_first_stock_count_creates_stock(): void
+    {
+        $key = (string) Str::uuid();
+
+        $adjustmentId = $this->inventory->reconcileStockCount(
+            $this->warehouseId,
+            $this->variantId,
+            5,
+            'STOCKTAKE-007',
+            $key
+        );
+
+        $this->assertGreaterThan(0, $adjustmentId);
+
+        $this->assertStock(5, 0);
+
+        $this->assertDatabaseHas('inventory_adjustments', [
+            'id' => $adjustmentId,
+            'previous_qty' => 0,
+            'counted_qty' => 5,
+            'quantity_delta' => 5,
+            'reason' => 'stocktake',
+        ]);
+
+        $this->assertDatabaseHas('inventory_movements', [
+            'type' => 'adjustment',
+            'quantity_delta' => 5,
+            'reference' => 'ADJ-' . $key,
+        ]);
+
+        $this->assertSame(1, $this->adjustmentCount($key));
+        $this->assertSame(1, $this->movementCount($key));
+    }
+
+    /*
+     * Вспомогательные методы.
+     */
+
+    private function assertStock(
+        int $onHand,
+        int $reserved
+    ): void {
+        $this->assertDatabaseHas('inventory_stocks', [
+            'warehouse_id' => $this->warehouseId,
+            'variant_id' => $this->variantId,
+            'on_hand_qty' => $onHand,
+            'reserved_qty' => $reserved,
+        ]);
+    }
+
+    private function adjustmentCount(string $key): int
+    {
+        return DB::table('inventory_adjustments')
+            ->where('adjustment_key', $key)
+            ->count();
+    }
+
+    private function movementCount(string $key): int
+    {
+        return DB::table('inventory_movements')
+            ->where('reference', 'ADJ-' . $key)
+            ->count();
+    }
+
+
+    public function test_adjustment_with_current_revision_succeeds(): void
+    {
+        $stock = $this->inventory->receive(
+            $this->warehouseId,
+            $this->variantId,
+            10,
+            'REV-RECEIPT-001'
+        );
+
+        $revision = (int) $stock->fresh()->revision;
+        $key = (string) Str::uuid();
+
+        $id = $this->inventory->reconcileStockCount(
+            $this->warehouseId,
+            $this->variantId,
+            7,
+            'REV-STOCKTAKE-001',
+            $key,
+            'stocktake',
+            null,
+            $revision
+        );
+
+        $this->assertGreaterThan(0, $id);
+        $this->assertStock(7, 0);
+
+        $this->assertEquals(
+            $revision + 1,
+            $stock->fresh()->revision
+        );
+
+        $this->assertDatabaseHas('inventory_adjustments', [
+            'id' => $id,
+            'expected_revision' => $revision,
+            'previous_qty' => 10,
+            'counted_qty' => 7,
+            'quantity_delta' => -3,
+        ]);
+    }
+
+    public function test_stale_stock_count_is_rejected(): void
+    {
+        $stock = $this->inventory->receive(
+            $this->warehouseId,
+            $this->variantId,
+            10,
+            'REV-RECEIPT-002'
+        );
+
+        // Сотрудник запомнил версию при начале подсчёта.
+        $oldRevision = (int) $stock->fresh()->revision;
+
+        // Пока он считал, на склад поступили ещё 2 единицы.
+        $this->inventory->receive(
+            $this->warehouseId,
+            $this->variantId,
+            2,
+            'REV-RECEIPT-002-B'
+        );
+
+        $this->assertGreaterThan(
+            $oldRevision,
+            (int) $stock->fresh()->revision
+        );
+
+        $key = (string) Str::uuid();
+
+        try {
+            $this->inventory->reconcileStockCount(
+                $this->warehouseId,
+                $this->variantId,
+                9,
+                'REV-STOCKTAKE-002',
+                $key,
+                'stocktake',
+                null,
+                $oldRevision
+            );
+
+            $this->fail('Устаревший подсчёт должен быть отклонён.');
+        } catch (DomainException $exception) {
+            $this->assertStringContainsString(
+                'застаріли',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertStock(12, 0);
+        $this->assertSame(0, $this->adjustmentCount($key));
+        $this->assertSame(0, $this->movementCount($key));
+    }
+
+    public function test_reservation_changes_stock_revision(): void
+    {
+        $stock = $this->inventory->receive(
+            $this->warehouseId,
+            $this->variantId,
+            10,
+            'REV-RECEIPT-003'
+        );
+
+        $oldRevision = (int) $stock->fresh()->revision;
+
+        // Физическое количество не изменяется,
+        // но резерв изменяет состояние склада.
+        $this->inventory->reserveForOrder(
+            $this->warehouseId,
+            $this->variantId,
+            3,
+            'REV-ORDER-003',
+            (string) Str::uuid()
+        );
+
+        $this->assertStock(10, 3);
+
+        $this->assertGreaterThan(
+            $oldRevision,
+            (int) $stock->fresh()->revision
+        );
+
+        $key = (string) Str::uuid();
+
+        try {
+            $this->inventory->reconcileStockCount(
+                $this->warehouseId,
+                $this->variantId,
+                9,
+                'REV-STOCKTAKE-003',
+                $key,
+                'stocktake',
+                null,
+                $oldRevision
+            );
+
+            $this->fail('Старая версия должна быть отклонена.');
+        } catch (DomainException $exception) {
+            $this->assertStringContainsString(
+                'застаріли',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertStock(10, 3);
+        $this->assertSame(0, $this->adjustmentCount($key));
+    }
+
+    public function test_adjustment_revision_is_idempotent(): void
+    {
+        $stock = $this->inventory->receive(
+            $this->warehouseId,
+            $this->variantId,
+            10,
+            'REV-RECEIPT-004'
+        );
+
+        $revision = (int) $stock->fresh()->revision;
+        $key = (string) Str::uuid();
+
+        $firstId = $this->inventory->reconcileStockCount(
+            $this->warehouseId,
+            $this->variantId,
+            8,
+            'REV-STOCKTAKE-004',
+            $key,
+            'stocktake',
+            null,
+            $revision
+        );
+
+        // Повторяем запрос с исходной версией.
+        $secondId = $this->inventory->reconcileStockCount(
+            $this->warehouseId,
+            $this->variantId,
+            8,
+            'REV-STOCKTAKE-004',
+            $key,
+            'stocktake',
+            null,
+            $revision
+        );
+
+        $this->assertSame($firstId, $secondId);
+        $this->assertStock(8, 0);
+
+        // Документ и движение созданы только один раз.
+        $this->assertSame(1, $this->adjustmentCount($key));
+        $this->assertSame(1, $this->movementCount($key));
+
+        // Тот же UUID с другой версией использовать нельзя.
+        try {
+            $this->inventory->reconcileStockCount(
+                $this->warehouseId,
+                $this->variantId,
+                8,
+                'REV-STOCKTAKE-004',
+                $key,
+                'stocktake',
+                null,
+                $revision + 1
+            );
+
+            $this->fail('Изменение версии запроса должно быть запрещено.');
+        } catch (InvalidArgumentException $exception) {
+            $this->assertStringContainsString(
+                'UUID коригування вже використано',
+                $exception->getMessage()
+            );
+        }
+
+        $this->assertStock(8, 0);
+        $this->assertSame(1, $this->adjustmentCount($key));
+    }
+
+}

@@ -1,0 +1,482 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Services\Inventory\InventoryService;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+use RuntimeException;
+use Symfony\Component\Process\Process;
+use Tests\TestCase;
+
+class InventoryTransferConcurrencyTest extends TestCase
+{
+    private InventoryService $inventory;
+
+    private int $warehouseA = 0;
+    private int $warehouseB = 0;
+    private int $productId = 0;
+    private int $variantId = 0;
+
+    private ?string $gateFile = null;
+
+    /** @var Process[] */
+    private array $workers = [];
+
+    private array $movementReferences = [];
+    private array $workerOutputs = [];
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        if (
+            config('database.default') !== 'pgsql' ||
+            DB::connection()->getDatabaseName()
+            !== 'boardriders_test'
+        ) {
+            throw new RuntimeException(
+                'Only boardriders_test is allowed.'
+            );
+        }
+
+        $this->inventory = app(InventoryService::class);
+
+        $now = now();
+        $suffix = (string) Str::uuid();
+
+        $this->warehouseA = DB::table('warehouses')
+            ->insertGetId([
+                'code' => 'RACE-A-' . $suffix,
+                'name' => 'Concurrency Warehouse A',
+                'kind' => 'owned',
+                'country_code' => 'UA',
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+        $this->warehouseB = DB::table('warehouses')
+            ->insertGetId([
+                'code' => 'RACE-B-' . $suffix,
+                'name' => 'Concurrency Warehouse B',
+                'kind' => 'owned',
+                'country_code' => 'UA',
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+        $this->productId = DB::table('products')
+            ->insertGetId([
+                'status' => 'draft',
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+        $this->variantId = DB::table('product_variants')
+            ->insertGetId([
+                'product_id' => $this->productId,
+                'sku' => 'RACE-TRF-' . $suffix,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+    }
+
+    /**
+     * 1. Одновременные встречные перемещения.
+     *
+     * Оба должны завершиться успешно,
+     * а общее количество товара — сохраниться.
+     */
+    public function test_simultaneous_opposite_transfers(): void
+    {
+        $this->receive($this->warehouseA, 10);
+        $this->receive($this->warehouseB, 10);
+
+        $results = $this->runRace(
+            [
+                $this->warehouseA,
+                $this->warehouseB,
+                4,
+                'RACE-ORDER-A',
+                (string) Str::uuid(),
+            ],
+            [
+                $this->warehouseB,
+                $this->warehouseA,
+                3,
+                'RACE-ORDER-B',
+                (string) Str::uuid(),
+            ]
+        );
+
+        $this->assertSame(
+            [0, 0],
+            $results,
+            implode("\n", $this->workerOutputs)
+        );
+
+        // A: 10 - 4 + 3 = 9.
+        $this->assertStock($this->warehouseA, 9);
+
+        // B: 10 + 4 - 3 = 11.
+        $this->assertStock($this->warehouseB, 11);
+
+        $this->assertSame(20, $this->totalStock());
+        $this->assertSame(2, $this->transferCount());
+        $this->assertSame(4, $this->transferMovementCount());
+    }
+
+    /**
+     * 2. Два процесса пытаются отправить
+     * по 4 единицы, хотя доступно только 5.
+     *
+     * Успешным должен быть только один.
+     */
+    public function test_simultaneous_transfers_cannot_oversell(): void
+    {
+        $this->receive($this->warehouseA, 5);
+        $this->receive($this->warehouseB, 1);
+
+        $results = $this->runRace(
+            [
+                $this->warehouseA,
+                $this->warehouseB,
+                4,
+                'RACE-OVERSELL-A',
+                (string) Str::uuid(),
+            ],
+            [
+                $this->warehouseA,
+                $this->warehouseB,
+                4,
+                'RACE-OVERSELL-B',
+                (string) Str::uuid(),
+            ]
+        );
+
+        sort($results);
+
+        // 0 = успех, 2 = недостаточно товара.
+        $this->assertSame(
+            [0, 2],
+            $results,
+            implode("\n", $this->workerOutputs)
+        );
+
+        $this->assertStock($this->warehouseA, 1);
+        $this->assertStock($this->warehouseB, 5);
+
+        $this->assertSame(6, $this->totalStock());
+        $this->assertSame(1, $this->transferCount());
+        $this->assertSame(2, $this->transferMovementCount());
+    }
+
+    /**
+     * 3. Два одинаковых запроса с одним UUID.
+     *
+     * Оба процесса могут получить успешный
+     * ответ, но перемещение должно быть одно.
+     */
+    public function test_simultaneous_duplicate_key_is_idempotent(): void
+    {
+        $this->receive($this->warehouseA, 6);
+        $this->receive($this->warehouseB, 1);
+
+        $key = (string) Str::uuid();
+
+        $request = [
+            $this->warehouseA,
+            $this->warehouseB,
+            2,
+            'RACE-DUPLICATE',
+            $key,
+        ];
+
+        $results = $this->runRace($request, $request);
+
+        $this->assertSame(
+            [0, 0],
+            $results,
+            implode("\n", $this->workerOutputs)
+        );
+
+        $this->assertStock($this->warehouseA, 4);
+        $this->assertStock($this->warehouseB, 3);
+
+        $this->assertSame(7, $this->totalStock());
+        $this->assertSame(1, $this->transferCount());
+        $this->assertSame(2, $this->transferMovementCount());
+    }
+
+    /**
+     * Приходуем товар с уникальным документом.
+     */
+    private function receive(int $warehouseId, int $quantity): void
+    {
+        $reference = 'RACE-RECEIPT-' . Str::uuid();
+
+        $this->movementReferences[] = $reference;
+
+        $this->inventory->receiveOnce(
+            $warehouseId,
+            $this->variantId,
+            $quantity,
+            $reference,
+            (string) \Illuminate\Support\Str::uuid()
+        );
+    }
+
+    /**
+     * Запускаем два независимых PHP-процесса.
+     *
+     * Дополнительно удерживаем блокировку
+     * одного складского остатка, чтобы процессы
+     * конкурировали за доступ к нему.
+     */
+    private function runRace(array $first, array $second): array
+    {
+        $this->gateFile = sys_get_temp_dir()
+            . DIRECTORY_SEPARATOR
+            . 'boardriders-transfer-'
+            . Str::uuid()
+            . '.go';
+
+        foreach ([$first, $second] as $args) {
+            [
+                $fromWarehouse,
+                $toWarehouse,
+                $quantity,
+                $reference,
+                $key,
+            ] = $args;
+
+            $this->movementReferences[] = 'TRF-' . $key;
+
+            $process = new Process(
+                [
+                    PHP_BINARY,
+                    base_path(
+                        'tests/Support/inventory-transfer-worker.php'
+                    ),
+                    (string) $fromWarehouse,
+                    (string) $toWarehouse,
+                    (string) $this->variantId,
+                    (string) $quantity,
+                    $reference,
+                    $key,
+                    $this->gateFile,
+                ],
+                base_path(),
+                ['APP_ENV' => 'testing']
+            );
+
+            $process->setTimeout(25);
+
+            $this->workers[] = $process;
+        }
+
+        $lowestStockId = DB::table('inventory_stocks')
+            ->where('variant_id', $this->variantId)
+            ->whereIn('warehouse_id', [
+                $this->warehouseA,
+                $this->warehouseB,
+            ])
+            ->orderBy('id')
+            ->value('id');
+
+        if ($lowestStockId === null) {
+            throw new RuntimeException(
+                'No stock row available for lock.'
+            );
+        }
+
+        DB::beginTransaction();
+
+        try {
+            DB::table('inventory_stocks')
+                ->where('id', $lowestStockId)
+                ->lockForUpdate()
+                ->first();
+
+            foreach ($this->workers as $worker) {
+                $worker->start();
+            }
+
+            $deadline = microtime(true) + 12;
+
+            // Ждём готовности обоих процессов.
+            while (
+                !str_contains(
+                    $this->workers[0]->getOutput(),
+                    'READY'
+                ) ||
+                !str_contains(
+                    $this->workers[1]->getOutput(),
+                    'READY'
+                )
+            ) {
+                if (microtime(true) >= $deadline) {
+                    throw new RuntimeException(
+                        'Workers failed to start: '
+                        . $this->workers[0]->getErrorOutput()
+                        . $this->workers[1]->getErrorOutput()
+                    );
+                }
+
+                usleep(20000);
+            }
+
+            // Разрешаем обоим начать перемещение.
+            if (file_put_contents($this->gateFile, 'GO') === false) {
+                throw new RuntimeException(
+                    'Cannot open worker start gate.'
+                );
+            }
+
+            // Кратко удерживаем блокировку,
+            // чтобы запросы встретились в PostgreSQL.
+            usleep(350000);
+        } finally {
+            DB::rollBack();
+        }
+
+        foreach ($this->workers as $worker) {
+            $worker->wait();
+
+            $this->workerOutputs[] =
+                $worker->getOutput()
+                . $worker->getErrorOutput();
+        }
+
+        return array_map(
+            fn (Process $worker) => $worker->getExitCode(),
+            $this->workers
+        );
+    }
+
+    private function assertStock(
+        int $warehouseId,
+        int $expectedQuantity
+    ): void {
+        $this->assertDatabaseHas('inventory_stocks', [
+            'warehouse_id' => $warehouseId,
+            'variant_id' => $this->variantId,
+            'on_hand_qty' => $expectedQuantity,
+            'reserved_qty' => 0,
+        ]);
+    }
+
+    private function totalStock(): int
+    {
+        return (int) DB::table('inventory_stocks')
+            ->where('variant_id', $this->variantId)
+            ->sum('on_hand_qty');
+    }
+
+    private function transferCount(): int
+    {
+        return DB::table('inventory_transfers')
+            ->where('variant_id', $this->variantId)
+            ->count();
+    }
+
+    private function transferMovementCount(): int
+    {
+        return DB::table('inventory_movements')
+            ->whereIn(
+                'reference',
+                array_filter(
+                    $this->movementReferences,
+                    fn ($reference) =>
+                    str_starts_with($reference, 'TRF-')
+                )
+            )
+            ->count();
+    }
+
+    /**
+     * Удаляем только данные, созданные этим тестом.
+     *
+     * DatabaseTransactions здесь не используется,
+     * потому что дочерние процессы должны видеть
+     * данные через независимые соединения.
+     */
+    protected function tearDown(): void
+    {
+        try {
+            foreach ($this->workers as $worker) {
+                if ($worker->isRunning()) {
+                    $worker->stop(1);
+                }
+            }
+
+            if (
+                $this->gateFile !== null
+                && is_file($this->gateFile)
+            ) {
+                unlink($this->gateFile);
+            }
+
+            if ($this->variantId > 0) {
+                DB::table('inventory_movements')
+                    ->whereIn(
+                        'reference',
+                        array_unique($this->movementReferences)
+                    )
+                    ->delete();
+
+                DB::table('inventory_transfers')
+                    ->where('variant_id', $this->variantId)
+                    ->delete();
+
+
+                $stockIds = DB::table('inventory_stocks')
+                    ->where('variant_id', $this->variantId)
+                    ->pluck('id');
+
+// Удаляем все движения тестовых остатков.
+                DB::table('inventory_movements')
+                    ->whereIn('inventory_stock_id', $stockIds)
+                    ->delete();
+
+// Удаляем записи приёмок.
+                DB::table('inventory_receipts')
+                    ->whereIn('inventory_stock_id', $stockIds)
+                    ->delete();
+
+// Теперь остатки можно безопасно удалить.
+                DB::table('inventory_stocks')
+                    ->where('variant_id', $this->variantId)
+                    ->delete();
+
+
+                DB::table('inventory_stocks')
+                    ->where('variant_id', $this->variantId)
+                    ->delete();
+
+                DB::table('product_variants')
+                    ->where('id', $this->variantId)
+                    ->delete();
+            }
+
+            if ($this->productId > 0) {
+                DB::table('products')
+                    ->where('id', $this->productId)
+                    ->delete();
+            }
+
+            $warehouseIds = array_filter([
+                $this->warehouseA,
+                $this->warehouseB,
+            ]);
+
+            if ($warehouseIds !== []) {
+                DB::table('warehouses')
+                    ->whereIn('id', $warehouseIds)
+                    ->delete();
+            }
+        } finally {
+            parent::tearDown();
+        }
+    }
+}

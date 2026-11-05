@@ -1,41 +1,59 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# Local configuration / secrets
+.env
+.env.*
+!.env.example
 
-# dependencies
-/node_modules
-/.pnp
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
+# Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/*.tsbuildinfo
 
-# testing
-/coverage
+# Laravel
+backend/vendor/
+backend/.phpunit.cache/
+backend/storage/logs/*
+backend/bootstrap/cache/*.php
+backend/storage/framework/cache/*
+backend/storage/framework/sessions/*
+backend/storage/framework/views/*
 
-# next.js
-/.next/
-/out/
-
-# production
-/build
-
-# misc
+# Other
 .DS_Store
-*.pem
+.idea/
+.vscode/
 
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
+# Environment and secrets
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.p12
+**/*.pfx
 
-# vercel
-.vercel
+# Laravel
+**/vendor/
+**/storage/logs/
+**/storage/framework/cache/
+**/storage/framework/sessions/
+**/storage/framework/views/
+**/bootstrap/cache/*.php
 
-# typescript
-*.tsbuildinfo
-next-env.d.ts
+# Next.js
+**/node_modules/
+**/.next/
+**/out/
+**/dist/
+**/coverage/
+
+# IDE
+.idea/
+.vscode/
+
+# Temporary files
+*.log
+*.bak
+*.dump
+.DS_Store
+Thumbs.db

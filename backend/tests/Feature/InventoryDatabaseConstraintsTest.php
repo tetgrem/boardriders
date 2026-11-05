@@ -1,0 +1,224 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Services\Inventory\InventoryService;
+use Illuminate\Database\QueryException;
+use Illuminate\Foundation\Testing\DatabaseTransactions;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+use RuntimeException;
+use Tests\TestCase;
+
+class InventoryDatabaseConstraintsTest extends TestCase
+{
+    use DatabaseTransactions;
+
+    private int $warehouseId;
+    private int $variantId;
+    private int $stockId;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        if (
+            config('database.default') !== 'pgsql' ||
+            DB::connection()->getDatabaseName() !== 'boardriders_test'
+        ) {
+            throw new RuntimeException(
+                'Tests allowed only in boardriders_test.'
+            );
+        }
+
+        $now = now();
+        $suffix = (string) Str::uuid();
+
+        $this->warehouseId = DB::table('warehouses')
+            ->insertGetId([
+                'code' => 'DB-CHECK-' . $suffix,
+                'name' => 'Database constraints test',
+                'kind' => 'owned',
+                'country_code' => 'UA',
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+        $productId = DB::table('products')
+            ->insertGetId([
+                'status' => 'draft',
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+        $this->variantId = DB::table('product_variants')
+            ->insertGetId([
+                'product_id' => $productId,
+                'sku' => 'DB-CHECK-' . $suffix,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+        $inventory = app(InventoryService::class);
+
+        $stock = $inventory->receiveOnce(
+            $this->warehouseId,
+            $this->variantId,
+            10,
+            'DB-CHECK-RECEIPT-' . $suffix,
+            (string) \Illuminate\Support\Str::uuid()
+        );
+
+        $this->stockId = $stock->id;
+    }
+
+    /**
+     * Проверяем, что PostgreSQL отклоняет SQL-запрос.
+     *
+     * Вложенная транзакция создаёт SAVEPOINT,
+     * чтобы после ошибки можно было продолжить тест.
+     */
+    private function assertDatabaseRejects(
+        callable $operation
+    ): void {
+        try {
+            DB::transaction($operation);
+
+            $this->fail(
+                'PostgreSQL accepted invalid inventory data.'
+            );
+        } catch (QueryException $exception) {
+            $this->assertNotEmpty(
+                $exception->getMessage()
+            );
+        }
+    }
+
+    /**
+     * 1. Отрицательный физический остаток запрещён.
+     */
+    public function test_database_rejects_negative_stock(): void
+    {
+        $this->assertDatabaseRejects(function () {
+            DB::table('inventory_stocks')
+                ->where('id', $this->stockId)
+                ->update([
+                    'on_hand_qty' => -1,
+                ]);
+        });
+
+        $this->assertDatabaseHas('inventory_stocks', [
+            'id' => $this->stockId,
+            'on_hand_qty' => 10,
+            'reserved_qty' => 0,
+        ]);
+    }
+
+    /**
+     * 2. Резерв не может превышать физический остаток.
+     */
+    public function test_database_rejects_excessive_reservation(): void
+    {
+        $this->assertDatabaseRejects(function () {
+            DB::table('inventory_stocks')
+                ->where('id', $this->stockId)
+                ->update([
+                    'reserved_qty' => 11,
+                ]);
+        });
+
+        $this->assertDatabaseHas('inventory_stocks', [
+            'id' => $this->stockId,
+            'on_hand_qty' => 10,
+            'reserved_qty' => 0,
+        ]);
+    }
+
+    /**
+     * 3. Две записи остатка одного SKU
+     * на одном складе запрещены.
+     */
+    public function test_database_rejects_duplicate_stock(): void
+    {
+        $this->assertDatabaseRejects(function () {
+            DB::table('inventory_stocks')->insert([
+                'warehouse_id' => $this->warehouseId,
+                'variant_id' => $this->variantId,
+                'on_hand_qty' => 5,
+                'reserved_qty' => 0,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        });
+
+        $this->assertSame(
+            1,
+            DB::table('inventory_stocks')
+                ->where('warehouse_id', $this->warehouseId)
+                ->where('variant_id', $this->variantId)
+                ->count()
+        );
+    }
+
+    /**
+     * 4. Нельзя суммарно отгрузить и освободить
+     * больше зарезервированного количества.
+     */
+    public function test_database_rejects_invalid_reservation_totals(): void
+    {
+        $reservation = app(InventoryService::class)
+            ->reserveForOrder(
+                $this->warehouseId,
+                $this->variantId,
+                3,
+                'DB-CHECK-ORDER',
+                (string) Str::uuid()
+            );
+
+        $this->assertDatabaseRejects(function () use (
+            $reservation
+        ) {
+            DB::table('inventory_reservations')
+                ->where('id', $reservation->id)
+                ->update([
+                    'shipped_qty' => 2,
+                    'released_qty' => 2,
+                ]);
+        });
+
+        $this->assertDatabaseHas('inventory_reservations', [
+            'id' => $reservation->id,
+            'quantity' => 3,
+            'shipped_qty' => 0,
+            'released_qty' => 0,
+        ]);
+    }
+
+    /**
+     * 5. Движение склада с нулевой разницей
+     * должно быть отклонено PostgreSQL.
+     */
+    public function test_database_rejects_zero_quantity_movement(): void
+    {
+        $reference = 'DB-CHECK-ZERO-' . Str::uuid();
+
+        $this->assertDatabaseRejects(function () use (
+            $reference
+        ) {
+            DB::table('inventory_movements')->insert([
+                'inventory_stock_id' => $this->stockId,
+                'type' => 'adjustment',
+                'quantity_delta' => 0,
+                'reference' => $reference,
+                'created_at' => now(),
+            ]);
+        });
+
+        $this->assertSame(
+            0,
+            DB::table('inventory_movements')
+                ->where('reference', $reference)
+                ->count()
+        );
+    }
+}
