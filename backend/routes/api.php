@@ -1,38 +1,22 @@
 <?php
 
-use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\CatalogController;
 use App\Http\Controllers\Api\ProductCatalogController;
 use App\Http\Controllers\Api\CartPreviewController;
 use App\Http\Controllers\Api\PromotionPreviewController;
 use App\Http\Controllers\Api\LoyaltyWalletPreviewController;
-
+use App\Http\Controllers\Api\NovaPoshtaDirectoryController;
+use App\Http\Controllers\Api\NovaPoshtaDeliveryPreviewController;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1/catalog')->group(function () {
-    Route::get('/variants', [
-        CatalogController::class,
-        'index',
-    ]);
-
-    Route::get('/variants/{sku}', [
-        CatalogController::class,
-        'show',
-    ]);
-    Route::get('/products', [
-        ProductCatalogController::class,
-        'index',
-    ]);
-
-    Route::get('/products/{slug}', [
-        ProductCatalogController::class,
-        'show',
-    ]);
-
-    Route::get('/brands', [
-        ProductCatalogController::class,
-        'brands',
-    ]);
+    Route::get('/variants', [CatalogController::class, 'index']);
+    Route::get('/variants/{sku}', [CatalogController::class, 'show']);
+    Route::get('/products', [ProductCatalogController::class, 'index']);
+    Route::get('/products/{slug}', [ProductCatalogController::class, 'show']);
+    Route::get('/brands', [ProductCatalogController::class, 'brands']);
 });
 
 Route::prefix('v1/cart')->group(function () {
@@ -40,15 +24,13 @@ Route::prefix('v1/cart')->group(function () {
         ->middleware('throttle:60,1');
 });
 
-
 Route::get('/user', function (Request $request) {
     return $request->user();
 })->middleware('auth:sanctum');
 
-// Development health check. Replace with a more restrictive check before production.
-\Illuminate\Support\Facades\Route::get('/health', function () {
+Route::get('/health', function () {
     try {
-        \Illuminate\Support\Facades\DB::select('SELECT 1');
+        DB::select('SELECT 1');
 
         return response()->json([
             'service' => 'boardriders-api',
@@ -66,29 +48,24 @@ Route::get('/user', function (Request $request) {
     }
 });
 
-// ========================================
-// BOARDRIDERS — PROMOTIONS API
-// ========================================
-
 Route::prefix('v1/promotions')->group(function () {
-
-    Route::post(
-        '/preview',
-        PromotionPreviewController::class
-    )->middleware('throttle:30,1');
-
+    Route::post('/preview', PromotionPreviewController::class)
+        ->middleware('throttle:30,1');
 });
 
+Route::get('/v1/loyalty/wallet/preview', LoyaltyWalletPreviewController::class)
+    ->middleware(['auth:sanctum', 'throttle:60,1']);
 
-// ========================================
-// BOARDRIDERS — LOYALTY WALLET PREVIEW
-// ========================================
+Route::prefix('v1/delivery/nova-poshta')->group(function () {
+    Route::get('/settlements', [NovaPoshtaDirectoryController::class, 'settlements'])
+        ->middleware('throttle:30,1');
 
-// Інформаційний перегляд власного бонусного гаманця.
-Route::get(
-    '/v1/loyalty/wallet/preview',
-    LoyaltyWalletPreviewController::class
-)->middleware([
-    'auth:sanctum',
-    'throttle:60,1',
-]);
+    Route::get('/warehouses', [NovaPoshtaDirectoryController::class, 'warehouses'])
+        ->middleware('throttle:30,1');
+
+    Route::post('/verify', [NovaPoshtaDeliveryPreviewController::class, 'verify'])
+        ->middleware('throttle:10,1');
+
+    Route::post('/quote', [NovaPoshtaDeliveryPreviewController::class, 'quote'])
+        ->middleware('throttle:10,1');
+});
