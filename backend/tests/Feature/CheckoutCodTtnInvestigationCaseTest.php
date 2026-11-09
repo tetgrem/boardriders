@@ -4,6 +4,13 @@ namespace Tests\Feature;
 
 
 use App\Services\Pricing\CheckoutCodTtnDispatchPlanService;
+use App\Services\Pricing\CheckoutCodWarehousePackReadinessService;
+use App\Services\Pricing\CheckoutCodWarehousePackService;
+use App\Services\Pricing\CheckoutCodWarehousePackStatusService;
+use App\Services\Pricing\CheckoutCodWarehousePackQueueService;
+use App\Services\Pricing\CheckoutCodInternalPickSlipService;
+
+
 use App\Services\Pricing\CheckoutCodTtnDispatchReadinessService;
 use App\Services\Pricing\CheckoutCodTtnDispatchStatusService;
 use App\Services\Pricing\CheckoutCodTtnDispatchQueueService;
@@ -202,6 +209,24 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
             CheckoutCodTtnDispatchPlanService::REVIEW_ABILITY,
             static fn ($user): bool =>
                 (int) $user->getAuthIdentifier() === 1402
+        );
+
+        Gate::define(
+            CheckoutCodWarehousePackService::CHECK_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 1501
+        );
+
+        Gate::define(
+            CheckoutCodWarehousePackService::REVIEW_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 1502
+        );
+
+        Gate::define(
+            CheckoutCodInternalPickSlipService::GENERATE_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 1503
         );
 
 
@@ -1351,6 +1376,455 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
                 'reviewed_by' => 999,
             ]);
     }
+
+    private function warehouseReviewedDispatchPlan(): array
+    {
+        $this->stage();
+
+        $this->actor(1401);
+
+        $plan = app(CheckoutCodTtnDispatchPlanService::class)->prepare(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+
+        $this->actor(1402);
+
+        app(CheckoutCodTtnDispatchPlanService::class)->review(
+            $plan['operation_key'],
+            (string) Str::uuid(),
+            'reviewed_for_future_submission',
+            'local_plan_checked'
+        );
+
+        return $plan;
+    }
+
+    private function warehousePackCheck(?string $key = null): array
+    {
+        $this->actor(1501);
+
+        $source = app(CheckoutCodWarehousePackReadinessService::class)
+            ->inspect($this->orderKey);
+
+        $this->assertTrue($source['source_ready']);
+
+        return app(CheckoutCodWarehousePackService::class)->check(
+            $this->orderKey,
+            $key ?? (string) Str::uuid(),
+            'box',
+            $source['total_units'],
+            $source['gross_grams'],
+            $source['length_mm'],
+            $source['width_mm'],
+            $source['height_mm']
+        );
+    }
+
+    private function warehouseAcceptedPackCheck(): array
+    {
+        $check = $this->warehousePackCheck();
+
+        $this->actor(1502);
+
+        app(CheckoutCodWarehousePackService::class)->review(
+            $check['operation_key'],
+            (string) Str::uuid(),
+            'accepted',
+            'physical_count_and_dimensions_verified'
+        );
+
+        return $check;
+    }
+
+    public function test_warehouse_pack_needs_independently_reviewed_dispatch_plan(): void
+    {
+        $this->stage();
+        $this->actor(1501);
+
+        $this->assertFalse(
+            app(CheckoutCodWarehousePackReadinessService::class)
+                ->inspect($this->orderKey)['source_ready']
+        );
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodWarehousePackService::class)->check(
+            $this->orderKey,
+            (string) Str::uuid(),
+            'box',
+            2,
+            700,
+            300,
+            200,
+            100
+        );
+    }
+
+    public function test_warehouse_pack_records_physical_count_but_not_shipment(): void
+    {
+        $this->warehouseReviewedDispatchPlan();
+
+        $check = $this->warehousePackCheck();
+
+        $this->assertSame(2, $check['counted_units']);
+        $this->assertFalse($check['ttn_submission_allowed']);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_warehouse_pack_checks',
+            1
+        );
+
+        Http::assertNotSent(
+            static fn (ProviderRequest $request): bool =>
+                ($request->data()['calledMethod'] ?? null) === 'save'
+        );
+    }
+
+    public function test_warehouse_pack_same_uuid_is_idempotent(): void
+    {
+        $this->warehouseReviewedDispatchPlan();
+
+        $key = (string) Str::uuid();
+
+        $first = $this->warehousePackCheck($key);
+
+        $this->assertSame(
+            $first,
+            $this->warehousePackCheck($key)
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_warehouse_pack_checks',
+            1
+        );
+    }
+
+    public function test_warehouse_pack_second_uuid_cannot_replace_first_check(): void
+    {
+        $this->warehouseReviewedDispatchPlan();
+
+        $this->warehousePackCheck();
+
+        $this->expectException(DomainException::class);
+
+        $this->warehousePackCheck();
+    }
+
+    public function test_warehouse_pack_rejects_wrong_measured_gross_weight(): void
+    {
+        $this->warehouseReviewedDispatchPlan();
+
+        $source = app(CheckoutCodWarehousePackReadinessService::class)
+            ->inspect($this->orderKey);
+
+        $this->actor(1501);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodWarehousePackService::class)->check(
+            $this->orderKey,
+            (string) Str::uuid(),
+            'box',
+            $source['total_units'],
+            $source['gross_grams'] + 1,
+            $source['length_mm'],
+            $source['width_mm'],
+            $source['height_mm']
+        );
+    }
+
+    public function test_warehouse_pack_requires_operator_permission(): void
+    {
+        $this->warehouseReviewedDispatchPlan();
+
+        $source = app(CheckoutCodWarehousePackReadinessService::class)
+            ->inspect($this->orderKey);
+
+        $this->actor(999);
+
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodWarehousePackService::class)->check(
+            $this->orderKey,
+            (string) Str::uuid(),
+            'box',
+            $source['total_units'],
+            $source['gross_grams'],
+            $source['length_mm'],
+            $source['width_mm'],
+            $source['height_mm']
+        );
+    }
+
+    public function test_safety_hold_blocks_physical_pack_check(): void
+    {
+        $this->warehouseReviewedDispatchPlan();
+
+        $intent = DB::table('checkout_cod_ttn_submission_intents')
+            ->where(
+                'order_id',
+                DB::table('orders')
+                    ->where('order_key', $this->orderKey)
+                    ->value('id')
+            )
+            ->first(['intent_key']);
+
+        $this->event(
+            ['intent_key' => $intent->intent_key],
+            'reconciliation_required',
+            'reported_timeout'
+        );
+
+        $this->actor(1501);
+
+        $this->assertFalse(
+            app(CheckoutCodWarehousePackReadinessService::class)
+                ->inspect($this->orderKey)['source_ready']
+        );
+    }
+
+    public function test_warehouse_pack_reviewer_cannot_review_own_check(): void
+    {
+        $this->warehouseReviewedDispatchPlan();
+
+        $check = $this->warehousePackCheck();
+
+        Gate::define(
+            CheckoutCodWarehousePackService::REVIEW_ABILITY,
+            static fn ($user): bool => in_array(
+                (int) $user->getAuthIdentifier(),
+                [1501, 1502],
+                true
+            )
+        );
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodWarehousePackService::class)->review(
+            $check['operation_key'],
+            (string) Str::uuid(),
+            'accepted',
+            'physical_count_and_dimensions_verified'
+        );
+    }
+
+    public function test_warehouse_pack_review_is_idempotent(): void
+    {
+        $this->warehouseReviewedDispatchPlan();
+
+        $check = $this->warehousePackCheck();
+
+        $this->actor(1502);
+
+        $key = (string) Str::uuid();
+        $svc = app(CheckoutCodWarehousePackService::class);
+
+        $this->assertSame(
+            $svc->review(
+                $check['operation_key'],
+                $key,
+                'accepted',
+                'physical_count_and_dimensions_verified'
+            ),
+            $svc->review(
+                $check['operation_key'],
+                $key,
+                'accepted',
+                'physical_count_and_dimensions_verified'
+            )
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_warehouse_pack_reviews',
+            1
+        );
+    }
+
+
+    public function test_accepted_pack_enables_internal_slip_not_carrier_label(): void
+    {
+        $this->warehouseReviewedDispatchPlan();
+        $this->warehouseAcceptedPackCheck();
+
+        $this->actor(1200);
+
+        $status = app(CheckoutCodWarehousePackStatusService::class)
+            ->inspect($this->orderKey);
+
+        $this->assertSame(
+            'internal_pack_verified',
+            $status['status']
+        );
+
+        $this->assertTrue($status['internal_pick_slip_available']);
+        $this->assertFalse($status['carrier_label_available']);
+        $this->assertFalse($status['ttn_submission_allowed']);
+    }
+
+    public function test_rejected_pack_never_allows_internal_slip(): void
+    {
+        $this->warehouseReviewedDispatchPlan();
+
+        $check = $this->warehousePackCheck();
+
+        $this->actor(1502);
+
+        app(CheckoutCodWarehousePackService::class)->review(
+            $check['operation_key'],
+            (string) Str::uuid(),
+            'rejected',
+            'packaging_damaged'
+        );
+
+        $this->actor(1503);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodInternalPickSlipService::class)->generate(
+            $check['operation_key'],
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_internal_pick_slip_is_pii_free_and_idempotent(): void
+    {
+        $this->warehouseReviewedDispatchPlan();
+
+        $check = $this->warehouseAcceptedPackCheck();
+
+        $this->actor(1503);
+
+        $key = (string) Str::uuid();
+        $svc = app(CheckoutCodInternalPickSlipService::class);
+
+        $first = $svc->generate(
+            $check['operation_key'],
+            $key
+        );
+
+        $this->assertSame(
+            $first,
+            $svc->generate($check['operation_key'], $key)
+        );
+
+        $this->assertStringContainsString(
+            'INTERNAL PICK SLIP',
+            $first['content']
+        );
+
+        $this->assertStringContainsString(
+            'NOT A CARRIER LABEL',
+            $first['content']
+        );
+
+        $this->assertFalse($first['physical_print_confirmed']);
+
+        foreach ([
+                     'Петренко',
+                     '380671234567',
+                     self::WAYBILL,
+                     'ttn-gate-test-key',
+                 ] as $private) {
+            $this->assertStringNotContainsString(
+                $private,
+                $first['content']
+            );
+        }
+
+        $this->assertDatabaseCount(
+            'checkout_cod_warehouse_pick_slip_events',
+            1
+        );
+
+        Http::assertNotSent(
+            static fn (ProviderRequest $request): bool =>
+                ($request->data()['calledMethod'] ?? null) === 'save'
+        );
+    }
+
+    public function test_internal_pick_slip_cannot_be_generated_after_safety_event(): void
+    {
+        $this->warehouseReviewedDispatchPlan();
+
+        $check = $this->warehouseAcceptedPackCheck();
+
+        $intent = DB::table('checkout_cod_ttn_submission_intents')
+            ->where(
+                'order_id',
+                DB::table('orders')
+                    ->where('order_key', $this->orderKey)
+                    ->value('id')
+            )
+            ->first(['intent_key']);
+
+        $this->event(
+            ['intent_key' => $intent->intent_key],
+            'reconciliation_required',
+            'reported_timeout'
+        );
+
+        $this->actor(1503);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodInternalPickSlipService::class)->generate(
+            $check['operation_key'],
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_warehouse_pack_check_record_is_database_immutable(): void
+    {
+        $this->warehouseReviewedDispatchPlan();
+
+        $check = $this->warehousePackCheck();
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_warehouse_pack_checks')
+            ->where('id', $check['id'])
+            ->update([
+                'counted_units' => 999,
+            ]);
+    }
+
+    public function test_warehouse_queue_does_not_expose_customer_information(): void
+    {
+        $this->warehouseReviewedDispatchPlan();
+        $this->warehousePackCheck();
+
+        $this->actor(1200);
+
+        $queue = app(CheckoutCodWarehousePackQueueService::class)
+            ->recent();
+
+        $this->assertCount(1, $queue['items']);
+        $this->assertFalse($queue['ttn_submission_allowed']);
+
+        $json = json_encode($queue, JSON_THROW_ON_ERROR);
+
+        foreach ([
+                     'Петренко',
+                     '380671234567',
+                     self::WAYBILL,
+                 ] as $private) {
+            $this->assertStringNotContainsString(
+                $private,
+                $json
+            );
+        }
+    }
+
+    public function test_warehouse_queue_denies_unauthorized_reader(): void
+    {
+        $this->actor(999);
+
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodWarehousePackQueueService::class)->recent();
+    }
+
 
 
 }
