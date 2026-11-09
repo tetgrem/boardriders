@@ -3,6 +3,17 @@
 namespace Tests\Feature;
 
 
+use App\Services\Pricing\CheckoutCodSettlementCaseService;
+use App\Services\Pricing\CheckoutCodSettlementObservationService;
+use App\Services\Pricing\CheckoutCodSettlementReviewService;
+use App\Services\Pricing\CheckoutCodSettlementStatusService;
+use App\Services\Pricing\CheckoutCodSettlementQueueService;
+
+use App\Services\Pricing\CheckoutCodTtnTrackingCaseService;
+use App\Services\Pricing\CheckoutCodTtnTrackingPollService;
+use App\Services\Pricing\CheckoutCodTtnTrackingStatusService;
+use App\Services\Pricing\CheckoutCodTtnTrackingDueService;
+use Illuminate\Support\Facades\Artisan;
 use App\Services\Pricing\CheckoutCodTtnDispatchPlanService;
 use App\Services\Pricing\CheckoutCodWarehousePackReadinessService;
 use App\Services\Pricing\CheckoutCodWarehousePackService;
@@ -87,6 +98,16 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
     private bool $carrierScanFailure = false;
     private array $scanRows = [['IntDocNumber' => self::WAYBILL, 'Ref' => self::DOCUMENT_REF]];
     private array $documentRows = [];
+
+    private bool $trackingShouldFail = false;
+
+    private array $trackingRows = [
+        [
+            'Number' => self::WAYBILL,
+            'StatusCode' => '7',
+        ],
+    ];
+
 
     protected function setUp(): void
     {
@@ -250,6 +271,36 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
         );
 
 
+        Gate::define(
+            CheckoutCodTtnTrackingCaseService::START_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 1701
+        );
+
+        Gate::define(
+            CheckoutCodTtnTrackingPollService::POLL_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 1702
+        );
+
+        Gate::define(
+            CheckoutCodSettlementCaseService::OPEN_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 1801
+        );
+
+        Gate::define(
+            CheckoutCodSettlementObservationService::RECORD_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 1802
+        );
+
+        Gate::define(
+            CheckoutCodSettlementReviewService::REVIEW_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 1803
+        );
+
     }
 
     protected function tearDown(): void
@@ -295,6 +346,22 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
         );
         Http::fake(function (ProviderRequest $request) {
             $method = $request->data()['calledMethod'] ?? null;
+
+            if ($method === 'getStatusDocuments') {
+                if ($this->trackingShouldFail) {
+                    return Http::response([
+                        'success' => false,
+                        'data' => [],
+                        'errors' => ['test provider failure'],
+                    ], 503);
+                }
+
+                return Http::response([
+                    'success' => true,
+                    'data' => $this->trackingRows,
+                ]);
+            }
+
             if ($method === 'getDocumentPrice') {
                 return Http::response(['success' => true, 'data' => [[
                     'Cost' => '95.00', 'CostRedelivery' => '13.20',
@@ -2244,5 +2311,721 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
             ->assertMayHandoverToCarrier($this->orderKey);
     }
 
+
+    private function trackingCandidateReady(): array
+    {
+        $scan = $this->escalated();
+        $comparison = $this->compareDocument($scan);
+
+        $this->assertSame(
+            'snapshot_consistent',
+            $comparison['summary']
+        );
+
+        $this->actor(1701);
+
+        return app(CheckoutCodTtnTrackingCaseService::class)->start(
+            $comparison['operation_key'],
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_tracking_does_not_exist_before_comparison(): void
+    {
+        $this->flagged();
+        $this->actor(1701);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodTtnTrackingCaseService::class)->start(
+            (string) Str::uuid(),
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_tracking_registration_uses_matching_independent_evidence(): void
+    {
+        $candidate = $this->trackingCandidateReady();
+
+        $this->assertTrue($candidate['number_is_only_candidate']);
+        $this->assertFalse($candidate['carrier_ownership_verified']);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_ttn_tracking_cases',
+            1
+        );
+
+        Http::assertNotSent(
+            static fn (ProviderRequest $r): bool =>
+                ($r->data()['calledMethod'] ?? null) === 'getStatusDocuments'
+        );
+    }
+
+    public function test_tracking_case_replay_is_idempotent(): void
+    {
+        $scan = $this->escalated();
+        $comparison = $this->compareDocument($scan);
+
+        $this->actor(1701);
+
+        $key = (string) Str::uuid();
+        $service = app(CheckoutCodTtnTrackingCaseService::class);
+
+        $this->assertSame(
+            $service->start($comparison['operation_key'], $key),
+            $service->start($comparison['operation_key'], $key)
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_ttn_tracking_cases',
+            1
+        );
+    }
+
+    public function test_tracking_cannot_register_another_case_for_same_intent(): void
+    {
+        $scan = $this->escalated();
+        $comparison = $this->compareDocument($scan);
+
+        $this->actor(1701);
+
+        $svc = app(CheckoutCodTtnTrackingCaseService::class);
+
+        $svc->start(
+            $comparison['operation_key'],
+            (string) Str::uuid()
+        );
+
+        $this->expectException(DomainException::class);
+
+        $svc->start(
+            $comparison['operation_key'],
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_tracking_registration_requires_permission(): void
+    {
+        $scan = $this->escalated();
+        $comparison = $this->compareDocument($scan);
+
+        $this->actor(999);
+
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodTtnTrackingCaseService::class)->start(
+            $comparison['operation_key'],
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_tracking_poll_calls_only_read_only_carrier_status(): void
+    {
+        $candidate = $this->trackingCandidateReady();
+
+        $this->actor(1702);
+
+        $result = app(CheckoutCodTtnTrackingPollService::class)->poll(
+            $candidate['tracking_key'],
+            (string) Str::uuid()
+        );
+
+        $this->assertSame('observed', $result['outcome']);
+        $this->assertSame('7', $result['status_code']);
+        $this->assertFalse($result['delivery_confirmed_by_tracking']);
+        $this->assertFalse($result['cod_paid']);
+
+        Http::assertSent(
+            static fn (ProviderRequest $r): bool =>
+                ($r->data()['modelName'] ?? null) === 'TrackingDocument'
+                && ($r->data()['calledMethod'] ?? null)
+                === 'getStatusDocuments'
+                && (
+                    $r->data()['methodProperties']['Documents'][0]['DocumentNumber']
+                    ?? null
+                ) === self::WAYBILL
+        );
+
+        Http::assertNotSent(
+            static fn (ProviderRequest $r): bool =>
+                ($r->data()['calledMethod'] ?? null) === 'save'
+        );
+    }
+
+    public function test_tracking_same_poll_key_is_idempotent(): void
+    {
+        $candidate = $this->trackingCandidateReady();
+
+        $this->actor(1702);
+
+        $key = (string) Str::uuid();
+        $svc = app(CheckoutCodTtnTrackingPollService::class);
+
+        $first = $svc->poll($candidate['tracking_key'], $key);
+
+        $this->assertSame(
+            $first,
+            $svc->poll($candidate['tracking_key'], $key)
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_ttn_tracking_observations',
+            1
+        );
+    }
+
+    public function test_tracking_poll_uuid_cannot_be_replayed_by_different_actor(): void
+    {
+        $candidate = $this->trackingCandidateReady();
+
+        $this->actor(1702);
+
+        $key = (string) Str::uuid();
+
+        app(CheckoutCodTtnTrackingPollService::class)->poll(
+            $candidate['tracking_key'],
+            $key
+        );
+
+        Gate::define(
+            CheckoutCodTtnTrackingPollService::POLL_ABILITY,
+            static fn ($user): bool => in_array(
+                (int) $user->getAuthIdentifier(),
+                [1702, 1704],
+                true
+            )
+        );
+
+        $this->actor(1704);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodTtnTrackingPollService::class)->poll(
+            $candidate['tracking_key'],
+            $key
+        );
+    }
+
+    public function test_tracking_poll_rejects_unprivileged_user(): void
+    {
+        $candidate = $this->trackingCandidateReady();
+
+        $this->actor(999);
+
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodTtnTrackingPollService::class)->poll(
+            $candidate['tracking_key'],
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_tracking_status_preserves_last_good_code_after_provider_failure(): void
+    {
+        $candidate = $this->trackingCandidateReady();
+
+        $this->actor(1702);
+
+        $svc = app(CheckoutCodTtnTrackingPollService::class);
+
+        $svc->poll(
+            $candidate['tracking_key'],
+            (string) Str::uuid()
+        );
+
+        $this->trackingShouldFail = true;
+
+        $failure = $svc->poll(
+            $candidate['tracking_key'],
+            (string) Str::uuid()
+        );
+
+        $this->assertSame('provider_failure', $failure['outcome']);
+        $this->assertNull($failure['status_code']);
+
+        $this->actor(1200);
+
+        $status = app(CheckoutCodTtnTrackingStatusService::class)
+            ->inspect($this->orderKey);
+
+        $this->assertSame(
+            'carrier_temporarily_unavailable',
+            $status['status']
+        );
+
+        $this->assertSame(
+            '7',
+            $status['latest_observed_status_code']
+        );
+    }
+
+    public function test_tracking_mismatched_provider_response_is_inconclusive(): void
+    {
+        $candidate = $this->trackingCandidateReady();
+
+        $this->trackingRows = [
+            [
+                'Number' => self::OTHER_WAYBILL,
+                'StatusCode' => '9',
+            ],
+        ];
+
+        $this->actor(1702);
+
+        $poll = app(CheckoutCodTtnTrackingPollService::class)->poll(
+            $candidate['tracking_key'],
+            (string) Str::uuid()
+        );
+
+        $this->assertSame('inconclusive', $poll['outcome']);
+        $this->assertNull($poll['status_code']);
+    }
+
+    public function test_tracking_status_history_records_transitions_without_claiming_delivery(): void
+    {
+        $candidate = $this->trackingCandidateReady();
+
+        $this->actor(1702);
+
+        $poll = app(CheckoutCodTtnTrackingPollService::class);
+
+        $poll->poll(
+            $candidate['tracking_key'],
+            (string) Str::uuid()
+        );
+
+        $this->trackingRows = [
+            [
+                'Number' => self::WAYBILL,
+                'StatusCode' => '9',
+            ],
+        ];
+
+        CarbonImmutable::setTestNow(
+            CarbonImmutable::now('UTC')->addMinutes(2)
+        );
+
+        $poll->poll(
+            $candidate['tracking_key'],
+            (string) Str::uuid()
+        );
+
+        $this->actor(1200);
+
+        $status = app(CheckoutCodTtnTrackingStatusService::class)
+            ->inspect($this->orderKey);
+
+        $this->assertSame(
+            '9',
+            $status['latest_observed_status_code']
+        );
+
+        $this->assertTrue(
+            $status['status_changed_since_previous_success']
+        );
+
+        $this->assertFalse($status['delivery_confirmed_by_tracking']);
+        $this->assertFalse($status['cod_paid_by_tracking']);
+
+        $history = app(CheckoutCodTtnTrackingStatusService::class)
+            ->history($candidate['tracking_key']);
+
+        $this->assertCount(2, $history['items']);
+        $this->assertSame('9', $history['items'][0]['status_code']);
+    }
+
+    public function test_tracking_status_history_does_not_expose_sensitive_information(): void
+    {
+        $candidate = $this->trackingCandidateReady();
+
+        $this->actor(1702);
+
+        app(CheckoutCodTtnTrackingPollService::class)->poll(
+            $candidate['tracking_key'],
+            (string) Str::uuid()
+        );
+
+        $this->actor(1200);
+
+        $payload = json_encode([
+            app(CheckoutCodTtnTrackingStatusService::class)
+                ->inspect($this->orderKey),
+            app(CheckoutCodTtnTrackingStatusService::class)
+                ->history($candidate['tracking_key']),
+        ], JSON_THROW_ON_ERROR);
+
+        foreach ([
+                     'Петренко',
+                     '380671234567',
+                     self::WAYBILL,
+                     'ttn-gate-test-key',
+                 ] as $secret) {
+            $this->assertStringNotContainsString($secret, $payload);
+        }
+    }
+
+    public function test_tracking_observations_are_database_immutable(): void
+    {
+        $candidate = $this->trackingCandidateReady();
+
+        $this->actor(1702);
+
+        $observation = app(CheckoutCodTtnTrackingPollService::class)
+            ->poll(
+                $candidate['tracking_key'],
+                (string) Str::uuid()
+            );
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_ttn_tracking_observations')
+            ->where('id', $observation['id'])
+            ->update(['status_code' => '99']);
+    }
+
+    public function test_tracking_scheduler_throttles_and_polls_eligible_candidate(): void
+    {
+        $candidate = $this->trackingCandidateReady();
+
+        $due = app(CheckoutCodTtnTrackingDueService::class);
+
+        $this->assertContains(
+            $candidate['tracking_key'],
+            $due->due()
+        );
+
+        $this->assertSame(
+            0,
+            Artisan::call('cod:tracking-poll', ['--limit' => 1])
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_ttn_tracking_observations',
+            1
+        );
+
+        $this->assertNotContains(
+            $candidate['tracking_key'],
+            $due->due()
+        );
+
+        $this->travel(16)->minutes();
+
+        $this->assertContains(
+            $candidate['tracking_key'],
+            $due->due()
+        );
+    }
+
+    private function settlementReadyCase(): array
+    {
+        $this->stage();
+        $this->actor(1801);
+
+        return app(CheckoutCodSettlementCaseService::class)->open(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+    }
+
+    private function settlementClaim(
+        string $caseKey,
+        int $gross = 2000,
+        int $fee = 1320,
+        int $net = 680,
+        ?string $operationKey = null,
+        ?string $reference = null
+    ): array {
+        $this->actor(1802);
+
+        return app(CheckoutCodSettlementObservationService::class)
+            ->record(
+                $caseKey,
+                $operationKey ?? (string) Str::uuid(),
+                'novapay_statement',
+                $reference ?? ('STATEMENT_' . Str::random(16)),
+                $gross,
+                $fee,
+                $net
+            );
+    }
+
+    public function test_settlement_case_requires_cod_financial_preflight(): void
+    {
+        $this->actor(1801);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodSettlementCaseService::class)->open(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_settlement_case_pins_expected_cod_without_payment(): void
+    {
+        $case = $this->settlementReadyCase();
+
+        $this->assertSame(2000, $case['expected_cod_minor']);
+        $this->assertSame('UAH', $case['currency_code']);
+        $this->assertFalse($case['cod_paid']);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_settlement_cases',
+            1
+        );
+
+        $orderId = DB::table('orders')
+            ->where('order_key', $this->orderKey)
+            ->value('id');
+
+        $this->assertSame(
+            'pending',
+            DB::table('orders')
+                ->where('id', $orderId)
+                ->value('payment_status')
+        );
+    }
+
+    public function test_settlement_case_exact_retry_is_idempotent(): void
+    {
+        $case = $this->settlementReadyCase();
+
+        $this->assertSame(
+            $case,
+            app(CheckoutCodSettlementCaseService::class)->open(
+                $this->orderKey,
+                $case['case_key']
+            )
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_settlement_cases',
+            1
+        );
+    }
+
+    public function test_settlement_case_cannot_be_replaced(): void
+    {
+        $this->settlementReadyCase();
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodSettlementCaseService::class)->open(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_settlement_matching_observation_is_not_payment_proof(): void
+    {
+        $case = $this->settlementReadyCase();
+        $claim = $this->settlementClaim($case['case_key']);
+
+        $this->assertSame(
+            'consistent_with_estimate',
+            $claim['comparison_result']
+        );
+
+        $this->assertFalse($claim['funds_received_verified']);
+        $this->assertFalse($claim['cod_paid']);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_settlement_observations',
+            1
+        );
+    }
+
+    public function test_settlement_observation_replay_is_idempotent(): void
+    {
+        $case = $this->settlementReadyCase();
+
+        $key = (string) Str::uuid();
+        $reference = 'STATEMENT_REPLAY_1001';
+
+        $this->assertSame(
+            $this->settlementClaim(
+                $case['case_key'],
+                operationKey: $key,
+                reference: $reference
+            ),
+            $this->settlementClaim(
+                $case['case_key'],
+                operationKey: $key,
+                reference: $reference
+            )
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_settlement_observations',
+            1
+        );
+    }
+
+    public function test_settlement_duplicate_reference_with_new_key_is_blocked(): void
+    {
+        $case = $this->settlementReadyCase();
+
+        $this->settlementClaim(
+            $case['case_key'],
+            reference: 'STATEMENT_DUPLICATE_1001'
+        );
+
+        $this->expectException(DomainException::class);
+
+        $this->settlementClaim(
+            $case['case_key'],
+            reference: 'STATEMENT_DUPLICATE_1001'
+        );
+    }
+
+    public function test_settlement_gross_mismatch_enters_discrepancy_queue(): void
+    {
+        $case = $this->settlementReadyCase();
+
+        $claim = $this->settlementClaim(
+            $case['case_key'],
+            gross: 2500,
+            fee: 1320,
+            net: 1180
+        );
+
+        $this->assertSame(
+            'gross_mismatch',
+            $claim['comparison_result']
+        );
+
+        $this->actor(1200);
+
+        $status = app(CheckoutCodSettlementStatusService::class)
+            ->inspect($this->orderKey);
+
+        $this->assertSame(
+            'financial_discrepancy',
+            $status['status']
+        );
+
+        $this->assertSame(1, $status['discrepancies_count']);
+        $this->assertFalse($status['funds_received_verified']);
+    }
+
+    public function test_settlement_independent_review_keeps_claim_unverified(): void
+    {
+        $case = $this->settlementReadyCase();
+        $claim = $this->settlementClaim($case['case_key']);
+
+        $this->actor(1803);
+
+        $review = app(CheckoutCodSettlementReviewService::class)
+            ->review(
+                $claim['operation_key'],
+                (string) Str::uuid(),
+                'retain_unverified',
+                'external_confirmation_required'
+            );
+
+        $this->assertFalse($review['funds_received_verified']);
+        $this->assertFalse($review['cod_paid']);
+
+        $this->actor(1200);
+
+        $status = app(CheckoutCodSettlementStatusService::class)
+            ->inspect($this->orderKey);
+
+        $this->assertSame(
+            'claims_reviewed_external_confirmation_required',
+            $status['status']
+        );
+    }
+
+    public function test_settlement_author_cannot_review_own_claim(): void
+    {
+        $case = $this->settlementReadyCase();
+        $claim = $this->settlementClaim($case['case_key']);
+
+        Gate::define(
+            CheckoutCodSettlementReviewService::REVIEW_ABILITY,
+            static fn ($user): bool => in_array(
+                (int) $user->getAuthIdentifier(),
+                [1802, 1803],
+                true
+            )
+        );
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodSettlementReviewService::class)->review(
+            $claim['operation_key'],
+            (string) Str::uuid(),
+            'retain_unverified',
+            'external_confirmation_required'
+        );
+    }
+
+    public function test_settlement_direct_database_update_is_rejected(): void
+    {
+        $case = $this->settlementReadyCase();
+        $claim = $this->settlementClaim($case['case_key']);
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_settlement_observations')
+            ->where('id', $claim['id'])
+            ->update([
+                'claimed_gross_minor' => 999999,
+            ]);
+    }
+
+    public function test_settlement_queue_has_no_sensitive_references(): void
+    {
+        $case = $this->settlementReadyCase();
+
+        $this->settlementClaim(
+            $case['case_key'],
+            reference: 'STATEMENT_SUPERSECRET_2001'
+        );
+
+        $this->actor(1200);
+
+        $queue = app(CheckoutCodSettlementQueueService::class)
+            ->recent();
+
+        $this->assertCount(1, $queue['items']);
+
+        $json = json_encode($queue, JSON_THROW_ON_ERROR);
+
+        foreach ([
+                     'Петренко',
+                     '380671234567',
+                     'STATEMENT_SUPERSECRET_2001',
+                     'ttn-gate-test-key',
+                 ] as $secret) {
+            $this->assertStringNotContainsString(
+                $secret,
+                $json
+            );
+        }
+
+        $this->assertFalse($queue['cod_paid']);
+    }
+
+    public function test_settlement_unauthorized_observation_is_blocked(): void
+    {
+        $case = $this->settlementReadyCase();
+
+        $this->actor(999);
+
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodSettlementObservationService::class)->record(
+            $case['case_key'],
+            (string) Str::uuid(),
+            'manual_claim',
+            'STATEMENT_FORBIDDEN_3001',
+            2000,
+            1320,
+            680
+        );
+    }
 
 }
