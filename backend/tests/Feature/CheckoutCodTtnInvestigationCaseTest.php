@@ -9,8 +9,10 @@ use App\Services\Pricing\CheckoutCodWarehousePackService;
 use App\Services\Pricing\CheckoutCodWarehousePackStatusService;
 use App\Services\Pricing\CheckoutCodWarehousePackQueueService;
 use App\Services\Pricing\CheckoutCodInternalPickSlipService;
-
-
+use App\Services\Pricing\CheckoutCodFulfillmentStagingService;
+use App\Services\Pricing\CheckoutCodFulfillmentStatusService;
+use App\Services\Pricing\CheckoutCodFulfillmentQueueService;
+use App\Services\Pricing\CheckoutCodFulfillmentDispatchGuard;
 use App\Services\Pricing\CheckoutCodTtnDispatchReadinessService;
 use App\Services\Pricing\CheckoutCodTtnDispatchStatusService;
 use App\Services\Pricing\CheckoutCodTtnDispatchQueueService;
@@ -227,6 +229,24 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
             CheckoutCodInternalPickSlipService::GENERATE_ABILITY,
             static fn ($user): bool =>
                 (int) $user->getAuthIdentifier() === 1503
+        );
+
+        Gate::define(
+            CheckoutCodFulfillmentStagingService::STAGE_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 1601
+        );
+
+        Gate::define(
+            CheckoutCodFulfillmentStagingService::REVIEW_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 1602
+        );
+
+        Gate::define(
+            CheckoutCodFulfillmentStagingService::HOLD_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 1603
         );
 
 
@@ -1825,6 +1845,404 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
         app(CheckoutCodWarehousePackQueueService::class)->recent();
     }
 
+
+    private function fulfillmentStagingReady(): array
+    {
+        $this->warehouseReviewedDispatchPlan();
+        $this->warehouseAcceptedPackCheck();
+        $this->actor(1601);
+
+        return app(CheckoutCodFulfillmentStagingService::class)->stage(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_fulfillment_requires_independently_accepted_pack(): void
+    {
+        $this->warehouseReviewedDispatchPlan();
+        $this->actor(1601);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodFulfillmentStagingService::class)->stage(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_fulfillment_staging_does_not_ship_inventory_or_pay_cod(): void
+    {
+        $stage = $this->fulfillmentStagingReady();
+
+        $this->assertFalse($stage['inventory_shipped']);
+        $this->assertFalse($stage['carrier_handoff_allowed']);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_fulfillment_staging',
+            1
+        );
+
+        $orderId = DB::table('orders')
+            ->where('order_key', $this->orderKey)
+            ->value('id');
+
+        $this->assertSame(
+            'pending',
+            DB::table('orders')
+                ->where('id', $orderId)
+                ->value('payment_status')
+        );
+
+        $this->assertSame(
+            0,
+            (int) DB::table('inventory_reservations')
+                ->where('order_id', $orderId)
+                ->sum('shipped_qty')
+        );
+
+        Http::assertNotSent(
+            static fn (ProviderRequest $r): bool =>
+                ($r->data()['calledMethod'] ?? null) === 'save'
+        );
+    }
+
+    public function test_fulfillment_staging_exact_key_is_idempotent(): void
+    {
+        $stage = $this->fulfillmentStagingReady();
+
+        $this->assertSame(
+            $stage,
+            app(CheckoutCodFulfillmentStagingService::class)->stage(
+                $this->orderKey,
+                $stage['operation_key']
+            )
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_fulfillment_staging',
+            1
+        );
+    }
+
+    public function test_fulfillment_staging_second_uuid_is_blocked(): void
+    {
+        $this->fulfillmentStagingReady();
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodFulfillmentStagingService::class)->stage(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_fulfillment_staging_needs_permission(): void
+    {
+        $this->warehouseReviewedDispatchPlan();
+        $this->warehouseAcceptedPackCheck();
+        $this->actor(999);
+
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodFulfillmentStagingService::class)->stage(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_fulfillment_self_review_is_blocked_even_if_gate_allows(): void
+    {
+        $stage = $this->fulfillmentStagingReady();
+
+        Gate::define(
+            CheckoutCodFulfillmentStagingService::REVIEW_ABILITY,
+            static fn ($user): bool => in_array(
+                (int) $user->getAuthIdentifier(),
+                [1601, 1602],
+                true
+            )
+        );
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodFulfillmentStagingService::class)->review(
+            $stage['operation_key'],
+            (string) Str::uuid(),
+            'accepted',
+            'internal_custody_verified'
+        );
+    }
+
+    public function test_fulfillment_independent_review_is_internal_only(): void
+    {
+        $stage = $this->fulfillmentStagingReady();
+
+        $this->actor(1602);
+
+        $review = app(CheckoutCodFulfillmentStagingService::class)
+            ->review(
+                $stage['operation_key'],
+                (string) Str::uuid(),
+                'accepted',
+                'internal_custody_verified'
+            );
+
+        $this->assertFalse($review['inventory_shipped']);
+
+        $this->actor(1200);
+
+        $status = app(CheckoutCodFulfillmentStatusService::class)
+            ->inspect($this->orderKey);
+
+        $this->assertSame(
+            'internal_staging_reviewed',
+            $status['status']
+        );
+
+        $this->assertTrue($status['internal_staging_reviewed']);
+        $this->assertFalse($status['carrier_handoff_allowed']);
+        $this->assertFalse($status['actual_ttn_verified']);
+    }
+
+    public function test_fulfillment_review_exact_replay_is_idempotent(): void
+    {
+        $stage = $this->fulfillmentStagingReady();
+        $this->actor(1602);
+
+        $key = (string) Str::uuid();
+        $svc = app(CheckoutCodFulfillmentStagingService::class);
+
+        $first = $svc->review(
+            $stage['operation_key'],
+            $key,
+            'accepted',
+            'internal_custody_verified'
+        );
+
+        $this->assertSame(
+            $first,
+            $svc->review(
+                $stage['operation_key'],
+                $key,
+                'accepted',
+                'internal_custody_verified'
+            )
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_fulfillment_staging_reviews',
+            1
+        );
+    }
+
+    public function test_fulfillment_rejected_staging_never_allows_handoff(): void
+    {
+        $stage = $this->fulfillmentStagingReady();
+        $this->actor(1602);
+
+        app(CheckoutCodFulfillmentStagingService::class)->review(
+            $stage['operation_key'],
+            (string) Str::uuid(),
+            'rejected',
+            'stock_discrepancy'
+        );
+
+        $this->actor(1200);
+
+        $status = app(CheckoutCodFulfillmentStatusService::class)
+            ->inspect($this->orderKey);
+
+        $this->assertSame('staging_rejected', $status['status']);
+        $this->assertFalse($status['carrier_handoff_allowed']);
+    }
+
+    public function test_fulfillment_hold_before_review_prevents_approval(): void
+    {
+        $stage = $this->fulfillmentStagingReady();
+
+        $this->actor(1603);
+
+        app(CheckoutCodFulfillmentStagingService::class)->hold(
+            $stage['operation_key'],
+            (string) Str::uuid(),
+            'manual_security_hold'
+        );
+
+        $this->actor(1602);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodFulfillmentStagingService::class)->review(
+            $stage['operation_key'],
+            (string) Str::uuid(),
+            'accepted',
+            'internal_custody_verified'
+        );
+    }
+
+    public function test_fulfillment_hold_after_review_invalidates_internal_readiness(): void
+    {
+        $stage = $this->fulfillmentStagingReady();
+
+        $this->actor(1602);
+
+        app(CheckoutCodFulfillmentStagingService::class)->review(
+            $stage['operation_key'],
+            (string) Str::uuid(),
+            'accepted',
+            'internal_custody_verified'
+        );
+
+        $this->actor(1603);
+
+        app(CheckoutCodFulfillmentStagingService::class)->hold(
+            $stage['operation_key'],
+            (string) Str::uuid(),
+            'package_integrity_doubt'
+        );
+
+        $this->actor(1200);
+
+        $status = app(CheckoutCodFulfillmentStatusService::class)
+            ->inspect($this->orderKey);
+
+        $this->assertSame(
+            'internal_handoff_hold',
+            $status['status']
+        );
+
+        $this->assertFalse($status['internal_staging_reviewed']);
+    }
+
+    public function test_fulfillment_hold_exact_replay_is_idempotent(): void
+    {
+        $stage = $this->fulfillmentStagingReady();
+
+        $this->actor(1603);
+
+        $key = (string) Str::uuid();
+        $svc = app(CheckoutCodFulfillmentStagingService::class);
+
+        $this->assertSame(
+            $svc->hold(
+                $stage['operation_key'],
+                $key,
+                'manual_security_hold'
+            ),
+            $svc->hold(
+                $stage['operation_key'],
+                $key,
+                'manual_security_hold'
+            )
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_fulfillment_holds',
+            1
+        );
+    }
+
+    public function test_fulfillment_safety_event_blocks_new_staging(): void
+    {
+        $this->warehouseReviewedDispatchPlan();
+        $this->warehouseAcceptedPackCheck();
+
+        $intent = DB::table('checkout_cod_ttn_submission_intents')
+            ->where(
+                'order_id',
+                DB::table('orders')
+                    ->where('order_key', $this->orderKey)
+                    ->value('id')
+            )
+            ->first(['intent_key']);
+
+        $this->event(
+            ['intent_key' => $intent->intent_key],
+            'reconciliation_required',
+            'reported_timeout'
+        );
+
+        $this->actor(1601);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodFulfillmentStagingService::class)->stage(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_fulfillment_queue_redacts_customer_and_carrier_details(): void
+    {
+        $this->fulfillmentStagingReady();
+
+        $this->actor(1200);
+
+        $queue = app(CheckoutCodFulfillmentQueueService::class)
+            ->recent();
+
+        $this->assertCount(1, $queue['items']);
+
+        $json = json_encode($queue, JSON_THROW_ON_ERROR);
+
+        foreach ([
+                     'Петренко',
+                     '380671234567',
+                     self::WAYBILL,
+                     'ttn-gate-test-key',
+                 ] as $secret) {
+            $this->assertStringNotContainsString(
+                $secret,
+                $json
+            );
+        }
+
+        $this->assertFalse($queue['carrier_handoff_allowed']);
+    }
+
+    public function test_fulfillment_queue_requires_permission(): void
+    {
+        $this->actor(999);
+
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodFulfillmentQueueService::class)->recent();
+    }
+
+    public function test_fulfillment_staging_journal_rejects_updates(): void
+    {
+        $stage = $this->fulfillmentStagingReady();
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_fulfillment_staging')
+            ->where('id', $stage['id'])
+            ->update([
+                'expected_units' => 999,
+            ]);
+    }
+
+    public function test_fulfillment_carrier_handoff_guard_never_ships(): void
+    {
+        $stage = $this->fulfillmentStagingReady();
+
+        $this->actor(1602);
+
+        app(CheckoutCodFulfillmentStagingService::class)->review(
+            $stage['operation_key'],
+            (string) Str::uuid(),
+            'accepted',
+            'internal_custody_verified'
+        );
+
+        $this->actor(1200);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodFulfillmentDispatchGuard::class)
+            ->assertMayHandoverToCarrier($this->orderKey);
+    }
 
 
 }
