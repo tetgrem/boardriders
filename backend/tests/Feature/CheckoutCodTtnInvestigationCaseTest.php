@@ -3,6 +3,11 @@
 namespace Tests\Feature;
 
 
+use App\Services\Pricing\CheckoutCodTtnDispatchPlanService;
+use App\Services\Pricing\CheckoutCodTtnDispatchReadinessService;
+use App\Services\Pricing\CheckoutCodTtnDispatchStatusService;
+use App\Services\Pricing\CheckoutCodTtnDispatchQueueService;
+use App\Services\Pricing\CheckoutCodTtnDispatchTransportGuard;
 use App\Services\Pricing\CheckoutCodTtnEvidenceMatrixService;
 use App\Services\Pricing\CheckoutCodTtnResolutionService;
 use App\Services\Pricing\CheckoutCodTtnResolutionStatusService;
@@ -185,6 +190,20 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
             static fn ($user): bool =>
                 (int) $user->getAuthIdentifier() === 1302
         );
+
+
+        Gate::define(
+            CheckoutCodTtnDispatchPlanService::PREPARE_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 1401
+        );
+
+        Gate::define(
+            CheckoutCodTtnDispatchPlanService::REVIEW_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 1402
+        );
+
 
     }
 
@@ -956,5 +975,382 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
                 'outcome' => 'conflicting_evidence',
             ]);
     }
+
+
+    public function test_dispatch_status_without_intent_is_blocked(): void
+    {
+        $this->actor(1200);
+
+        $status = app(CheckoutCodTtnDispatchStatusService::class)
+            ->inspect($this->orderKey);
+
+        $this->assertNull($status['intent_id']);
+        $this->assertNull($status['plan_id']);
+        $this->assertFalse($status['ttn_submission_allowed']);
+
+        Http::assertNothingSent();
+    }
+
+    public function test_dispatch_plan_is_immutable_preparation_not_provider_call(): void
+    {
+        $this->stage();
+        $this->actor(1401);
+
+        $plan = app(CheckoutCodTtnDispatchPlanService::class)->prepare(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+
+        $this->assertFalse($plan['provider_call_made']);
+        $this->assertFalse($plan['ready_for_dispatch']);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_ttn_dispatch_plans',
+            1
+        );
+
+        Http::assertNotSent(
+            static fn (ProviderRequest $r): bool =>
+                ($r->data()['calledMethod'] ?? null) === 'save'
+        );
+    }
+
+    public function test_dispatch_plan_exact_operation_retry_is_idempotent(): void
+    {
+        $this->stage();
+        $this->actor(1401);
+
+        $key = (string) Str::uuid();
+        $service = app(CheckoutCodTtnDispatchPlanService::class);
+
+        $this->assertSame(
+            $service->prepare($this->orderKey, $key),
+            $service->prepare($this->orderKey, $key)
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_ttn_dispatch_plans',
+            1
+        );
+    }
+
+    public function test_dispatch_plan_different_uuid_cannot_replace_first_plan(): void
+    {
+        $this->stage();
+        $this->actor(1401);
+
+        app(CheckoutCodTtnDispatchPlanService::class)->prepare(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodTtnDispatchPlanService::class)->prepare(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_dispatch_plan_requires_permission(): void
+    {
+        $this->stage();
+        $this->actor(999);
+
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodTtnDispatchPlanService::class)->prepare(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_uncertain_ttn_outcome_prevents_dispatch_preparation(): void
+    {
+        $this->flagged();
+        $this->actor(1401);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodTtnDispatchPlanService::class)->prepare(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_safety_hold_prevents_dispatch_preparation(): void
+    {
+        $intent = $this->stage();
+
+        $this->event(
+            $intent,
+            'safety_hold',
+            'manual_review'
+        );
+
+        $this->actor(1401);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodTtnDispatchPlanService::class)->prepare(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_independent_review_never_authorizes_live_ttn(): void
+    {
+        $this->stage();
+        $this->actor(1401);
+
+        $plan = app(CheckoutCodTtnDispatchPlanService::class)->prepare(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+
+        $this->actor(1402);
+
+        $review = app(CheckoutCodTtnDispatchPlanService::class)->review(
+            $plan['operation_key'],
+            (string) Str::uuid(),
+            'reviewed_for_future_submission',
+            'local_plan_checked'
+        );
+
+        $this->assertFalse($review['carrier_permission_proven']);
+
+        $this->actor(1200);
+
+        $status = app(CheckoutCodTtnDispatchStatusService::class)
+            ->inspect($this->orderKey);
+
+        $this->assertSame(
+            'awaiting_trusted_carrier_authorization',
+            $status['status']
+        );
+
+        $this->assertFalse($status['ttn_submission_allowed']);
+        $this->assertFalse($status['ready_for_dispatch']);
+    }
+
+    public function test_dispatch_review_is_idempotent(): void
+    {
+        $this->stage();
+        $this->actor(1401);
+
+        $plan = app(CheckoutCodTtnDispatchPlanService::class)->prepare(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+
+        $this->actor(1402);
+
+        $key = (string) Str::uuid();
+        $service = app(CheckoutCodTtnDispatchPlanService::class);
+
+        $this->assertSame(
+            $service->review(
+                $plan['operation_key'],
+                $key,
+                'reviewed_for_future_submission',
+                'local_plan_checked'
+            ),
+            $service->review(
+                $plan['operation_key'],
+                $key,
+                'reviewed_for_future_submission',
+                'local_plan_checked'
+            )
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_ttn_dispatch_reviews',
+            1
+        );
+    }
+
+    public function test_dispatch_reviewer_cannot_approve_own_plan(): void
+    {
+        $this->stage();
+        $this->actor(1401);
+
+        $plan = app(CheckoutCodTtnDispatchPlanService::class)->prepare(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+
+        Gate::define(
+            CheckoutCodTtnDispatchPlanService::REVIEW_ABILITY,
+            static fn ($user): bool => in_array(
+                (int) $user->getAuthIdentifier(),
+                [1401, 1402],
+                true
+            )
+        );
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodTtnDispatchPlanService::class)->review(
+            $plan['operation_key'],
+            (string) Str::uuid(),
+            'reviewed_for_future_submission',
+            'local_plan_checked'
+        );
+    }
+
+    public function test_new_safety_event_invalidates_pending_dispatch_review(): void
+    {
+        $intent = $this->stage();
+        $this->actor(1401);
+
+        $plan = app(CheckoutCodTtnDispatchPlanService::class)->prepare(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+
+        $this->event(
+            $intent,
+            'reconciliation_required',
+            'reported_timeout'
+        );
+
+        $this->actor(1402);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodTtnDispatchPlanService::class)->review(
+            $plan['operation_key'],
+            (string) Str::uuid(),
+            'reviewed_for_future_submission',
+            'local_plan_checked'
+        );
+    }
+
+    public function test_rejected_dispatch_plan_stays_blocked(): void
+    {
+        $this->stage();
+        $this->actor(1401);
+
+        $plan = app(CheckoutCodTtnDispatchPlanService::class)->prepare(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+
+        $this->actor(1402);
+
+        app(CheckoutCodTtnDispatchPlanService::class)->review(
+            $plan['operation_key'],
+            (string) Str::uuid(),
+            'rejected',
+            'manual_risk_rejection'
+        );
+
+        $this->actor(1200);
+
+        $status = app(CheckoutCodTtnDispatchStatusService::class)
+            ->inspect($this->orderKey);
+
+        $this->assertSame('rejected', $status['status']);
+        $this->assertFalse($status['automatic_retry_allowed']);
+    }
+
+    public function test_dispatch_queue_redacts_recipient_and_api_key(): void
+    {
+        $this->stage();
+        $this->actor(1401);
+
+        app(CheckoutCodTtnDispatchPlanService::class)->prepare(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+
+        $this->actor(1200);
+
+        $queue = app(CheckoutCodTtnDispatchQueueService::class)
+            ->recent();
+
+        $this->assertCount(1, $queue['items']);
+
+        $json = json_encode($queue, JSON_THROW_ON_ERROR);
+
+        foreach ([
+                     'Петренко',
+                     '380671234567',
+                     'ttn-gate-test-key',
+                     self::WAYBILL,
+                 ] as $secret) {
+            $this->assertStringNotContainsString(
+                $secret,
+                $json
+            );
+        }
+    }
+
+    public function test_dispatch_queue_denies_unauthorized_user(): void
+    {
+        $this->actor(999);
+
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodTtnDispatchQueueService::class)->recent();
+    }
+
+    public function test_dispatch_transport_guard_is_never_a_bypass(): void
+    {
+        $this->stage();
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodTtnDispatchTransportGuard::class)
+            ->assertMaySend($this->orderKey);
+    }
+
+    public function test_dispatch_plan_database_record_cannot_be_changed(): void
+    {
+        $this->stage();
+        $this->actor(1401);
+
+        $plan = app(CheckoutCodTtnDispatchPlanService::class)->prepare(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_ttn_dispatch_plans')
+            ->where('id', $plan['id'])
+            ->update([
+                'prepared_by' => 999,
+            ]);
+    }
+
+    public function test_dispatch_review_database_record_cannot_be_changed(): void
+    {
+        $this->stage();
+        $this->actor(1401);
+
+        $plan = app(CheckoutCodTtnDispatchPlanService::class)->prepare(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+
+        $this->actor(1402);
+
+        $review = app(CheckoutCodTtnDispatchPlanService::class)->review(
+            $plan['operation_key'],
+            (string) Str::uuid(),
+            'reviewed_for_future_submission',
+            'local_plan_checked'
+        );
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_ttn_dispatch_reviews')
+            ->where('id', $review['id'])
+            ->update([
+                'reviewed_by' => 999,
+            ]);
+    }
+
 
 }
