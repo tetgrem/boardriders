@@ -2,6 +2,11 @@
 
 namespace Tests\Feature;
 
+
+use App\Services\Pricing\CheckoutCodTtnEvidenceMatrixService;
+use App\Services\Pricing\CheckoutCodTtnResolutionService;
+use App\Services\Pricing\CheckoutCodTtnResolutionStatusService;
+use App\Services\Pricing\CheckoutCodTtnRetryGuardService;
 use App\Services\Pricing\CheckoutCodTtnInvestigationService;
 use App\Services\Pricing\CheckoutCodTtnInvestigationStatusService;
 use App\Services\Pricing\CheckoutCodTtnInvestigationQueueService;
@@ -168,6 +173,19 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
             static fn ($user): bool => (int) $user->getAuthIdentifier() === 1014);
         Gate::define(CheckoutCodTtnInvestigationStatusService::VIEW_ABILITY,
             static fn ($user): bool => (int) $user->getAuthIdentifier() === 1200);
+
+        Gate::define(
+            CheckoutCodTtnResolutionService::CAPTURE_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 1301
+        );
+
+        Gate::define(
+            CheckoutCodTtnResolutionService::REVIEW_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 1302
+        );
+
     }
 
     protected function tearDown(): void
@@ -700,4 +718,243 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
         app(CheckoutCodTtnInvestigationQueueService::class)->recent(101);
     }
+
+
+    public function test_resolution_requires_reconciliation_hold(): void
+    {
+        $this->stage();
+
+        $this->actor(1301);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodTtnResolutionService::class)->capture(
+            $this->orderKey,
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_resolution_capture_is_idempotent_and_never_allows_retry(): void
+    {
+        $this->flagged();
+
+        $this->actor(1301);
+
+        $key = (string) Str::uuid();
+        $service = app(CheckoutCodTtnResolutionService::class);
+
+        $first = $service->capture($this->orderKey, $key);
+
+        $this->assertSame(
+            $first,
+            $service->capture($this->orderKey, $key)
+        );
+
+        $this->assertSame(
+            'insufficient_evidence',
+            $first['outcome']
+        );
+
+        $this->assertFalse($first['automatic_retry_allowed']);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_ttn_resolution_snapshots',
+            1
+        );
+    }
+
+    public function test_evidence_snapshot_can_be_independently_reviewed_but_hold_stays(): void
+    {
+        $intent = $this->flagged();
+
+        $scan = $this->scan($intent);
+        $this->independentReview($scan);
+        $this->compareDocument($scan);
+
+        $this->actor(1301);
+
+        $snapshot = app(CheckoutCodTtnResolutionService::class)
+            ->capture(
+                $this->orderKey,
+                (string) Str::uuid()
+            );
+
+        $this->assertSame(
+            'candidate_snapshot_consistent',
+            $snapshot['outcome']
+        );
+
+        $this->actor(1302);
+
+        $review = app(CheckoutCodTtnResolutionService::class)
+            ->review(
+                $snapshot['operation_key'],
+                (string) Str::uuid(),
+                'escalate_to_carrier',
+                'carrier_confirmation_required'
+            );
+
+        $this->assertFalse($review['ttn_submission_allowed']);
+
+        $this->actor(1200);
+
+        $status = app(CheckoutCodTtnResolutionStatusService::class)
+            ->inspect($this->orderKey);
+
+        $this->assertSame(
+            'reviewed_hold_continues',
+            $status['status']
+        );
+
+        $this->assertTrue($status['snapshot_is_current']);
+        $this->assertFalse($status['carrier_ownership_verified']);
+        $this->assertFalse($status['automatic_retry_allowed']);
+
+        $this->assertSame(
+            'reconciliation_required',
+            $this->safetyStatus()['status']
+        );
+
+        Http::assertNotSent(
+            static fn (ProviderRequest $request): bool =>
+                ($request->data()['calledMethod'] ?? null) === 'save'
+        );
+    }
+
+    public function test_snapshot_cannot_be_reviewed_after_evidence_changes(): void
+    {
+        $intent = $this->flagged();
+        $scan = $this->scan($intent);
+
+        $this->actor(1301);
+
+        $snapshot = app(CheckoutCodTtnResolutionService::class)
+            ->capture(
+                $this->orderKey,
+                (string) Str::uuid()
+            );
+
+        $this->independentReview($scan);
+
+        $this->actor(1302);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodTtnResolutionService::class)->review(
+            $snapshot['operation_key'],
+            (string) Str::uuid(),
+            'retain_hold',
+            'evidence_not_authoritative'
+        );
+    }
+
+    public function test_resolution_author_cannot_review_own_snapshot(): void
+    {
+        $this->flagged();
+
+        $this->actor(1301);
+
+        $snapshot = app(CheckoutCodTtnResolutionService::class)
+            ->capture(
+                $this->orderKey,
+                (string) Str::uuid()
+            );
+
+        Gate::define(
+            CheckoutCodTtnResolutionService::REVIEW_ABILITY,
+            static fn ($user): bool => in_array(
+                (int) $user->getAuthIdentifier(),
+                [1301, 1302],
+                true
+            )
+        );
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodTtnResolutionService::class)->review(
+            $snapshot['operation_key'],
+            (string) Str::uuid(),
+            'retain_hold',
+            'evidence_not_authoritative'
+        );
+    }
+
+    public function test_conflicting_candidate_numbers_are_flagged(): void
+    {
+        $intent = $this->flagged();
+
+        $this->scan($intent);
+        $this->scan(
+            $intent,
+            number: self::OTHER_WAYBILL
+        );
+
+        $this->actor(1200);
+
+        $status = app(CheckoutCodTtnResolutionStatusService::class)
+            ->inspect($this->orderKey);
+
+        $this->assertSame(
+            'conflicting_evidence',
+            $status['evidence_outcome']
+        );
+
+        $this->assertFalse($status['ttn_submission_allowed']);
+    }
+
+    public function test_retry_guard_blocks_after_two_person_review(): void
+    {
+        $this->flagged();
+
+        $this->actor(1301);
+
+        $snapshot = app(CheckoutCodTtnResolutionService::class)
+            ->capture(
+                $this->orderKey,
+                (string) Str::uuid()
+            );
+
+        $this->actor(1302);
+
+        app(CheckoutCodTtnResolutionService::class)->review(
+            $snapshot['operation_key'],
+            (string) Str::uuid(),
+            'retain_hold',
+            'evidence_not_authoritative'
+        );
+
+        $this->actor(1200);
+
+        $guard = app(CheckoutCodTtnRetryGuardService::class);
+
+        $this->assertFalse(
+            $guard->inspect($this->orderKey)['manual_retry_allowed']
+        );
+
+        $this->expectException(DomainException::class);
+
+        $guard->assertMaySubmit($this->orderKey);
+    }
+
+    public function test_resolution_database_journal_is_immutable(): void
+    {
+        $this->flagged();
+
+        $this->actor(1301);
+
+        $snapshot = app(CheckoutCodTtnResolutionService::class)
+            ->capture(
+                $this->orderKey,
+                (string) Str::uuid()
+            );
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_ttn_resolution_snapshots')
+            ->where('id', $snapshot['id'])
+            ->update([
+                'outcome' => 'conflicting_evidence',
+            ]);
+    }
+
 }
