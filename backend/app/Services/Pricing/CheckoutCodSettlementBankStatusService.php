@@ -57,7 +57,13 @@ final class CheckoutCodSettlementBankStatusService
                 'm.id', '=', 'r.match_id')
             ->where('m.case_id', $case->id)->count();
 
+
+        $financialHold = app(
+            CheckoutCodFinancialExceptionStatusService::class
+        )->hasCaseHold((int) $case->id);
+
         $status = match (true) {
+            $financialHold => 'financial_exception_hold',
             $bankCount === 0 => 'awaiting_bank_claim',
             $matchCount === 0 => 'awaiting_bank_matching',
             $mismatchCount > 0 => 'bank_discrepancy_requires_investigation',
@@ -67,11 +73,13 @@ final class CheckoutCodSettlementBankStatusService
 
         return array_merge($base, [
             'status' => $status,
+            'financial_exception_hold' => $financialHold,
             'bank_claims_count' => $bankCount,
             'match_proposals_count' => $matchCount,
             'match_reviews_count' => $reviewCount,
             'mismatches_count' => $mismatchCount,
         ]);
+
     }
 
     private function authorize(): void

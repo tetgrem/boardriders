@@ -9,6 +9,10 @@ use App\Services\Pricing\CheckoutCodBankBatchReviewService;
 use App\Services\Pricing\CheckoutCodBankBatchStatusService;
 use App\Services\Pricing\CheckoutCodBankBatchQueueService;
 
+use App\Services\Pricing\CheckoutCodFinancialExceptionService;
+use App\Services\Pricing\CheckoutCodFinancialExceptionStatusService;
+use App\Services\Pricing\CheckoutCodFinancialExceptionQueueService;
+
 use App\Services\Pricing\CheckoutCodSettlementCaseService;
 use App\Services\Pricing\CheckoutCodSettlementObservationService;
 use App\Services\Pricing\CheckoutCodSettlementReviewService;
@@ -347,6 +351,18 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
             CheckoutCodBankBatchReviewService::REVIEW_ABILITY,
             static fn ($user): bool =>
                 (int) $user->getAuthIdentifier() === 2003
+        );
+
+        Gate::define(
+            CheckoutCodFinancialExceptionService::REPORT_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 2101
+        );
+
+        Gate::define(
+            CheckoutCodFinancialExceptionService::REVIEW_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 2102
         );
 
     }
@@ -3972,6 +3988,599 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
         $this->expectException(AuthorizationException::class);
 
         app(CheckoutCodBankBatchQueueService::class)->recent();
+    }
+
+    private function financialExceptionReport(
+        string $kind,
+        array $source,
+        string $reason = 'incorrect_amount',
+        ?string $key = null
+    ): array {
+        $this->actor(2101);
+
+        return app(CheckoutCodFinancialExceptionService::class)->report(
+            $kind,
+            $source['operation_key'],
+            $key ?? (string) Str::uuid(),
+            $reason
+        );
+    }
+
+    private function financialExceptionReview(
+        array $incident,
+        string $decision = 'hold_for_investigation',
+        ?string $key = null
+    ): array {
+        $this->actor(2102);
+
+        return app(CheckoutCodFinancialExceptionService::class)->review(
+            $incident['exception_key'],
+            $key ?? (string) Str::uuid(),
+            $decision,
+            $decision === 'dismiss_report'
+                ? 'report_not_supported'
+                : 'await_external_evidence'
+        );
+    }
+
+    public function test_financial_exception_source_must_exist(): void
+    {
+        $this->actor(2101);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodFinancialExceptionService::class)->report(
+            'single',
+            (string) Str::uuid(),
+            (string) Str::uuid(),
+            'incorrect_amount'
+        );
+    }
+
+    public function test_financial_exception_report_requires_permission(): void
+    {
+        $this->actor(999);
+
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodFinancialExceptionService::class)->report(
+            'batch',
+            (string) Str::uuid(),
+            (string) Str::uuid(),
+            'incorrect_amount'
+        );
+    }
+
+    public function test_financial_exception_creates_immediate_hold_on_bank_claim(): void
+    {
+        $case = $this->settlementReadyCase();
+        $bank = $this->bankSettlementClaim($case);
+
+        $incident = $this->financialExceptionReport(
+            'single',
+            $bank
+        );
+
+        $this->assertSame(
+            'pending_review_hold',
+            $incident['status_at_creation']
+        );
+
+        $this->assertFalse($incident['refund_executed']);
+
+        $this->actor(1200);
+
+        $status = app(CheckoutCodFinancialExceptionStatusService::class)
+            ->inspect('single', $bank['operation_key']);
+
+        $this->assertTrue($status['financial_hold']);
+        $this->assertSame(
+            'pending_review_hold',
+            $status['status']
+        );
+
+        $this->assertSame(
+            'financial_exception_hold',
+            app(CheckoutCodSettlementBankStatusService::class)
+                ->inspect($this->orderKey)['status']
+        );
+    }
+
+    public function test_financial_exception_exact_report_replay_is_idempotent(): void
+    {
+        $bank = $this->bankSettlementClaim(
+            $this->settlementReadyCase()
+        );
+
+        $key = (string) Str::uuid();
+
+        $first = $this->financialExceptionReport(
+            'single',
+            $bank,
+            'incorrect_amount',
+            $key
+        );
+
+        $this->assertSame(
+            $first,
+            $this->financialExceptionReport(
+                'single',
+                $bank,
+                'incorrect_amount',
+                $key
+            )
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_financial_exceptions',
+            1
+        );
+    }
+
+    public function test_financial_exception_reused_report_uuid_with_new_reason_is_rejected(): void
+    {
+        $bank = $this->bankSettlementClaim(
+            $this->settlementReadyCase()
+        );
+
+        $key = (string) Str::uuid();
+
+        $this->financialExceptionReport(
+            'single',
+            $bank,
+            'incorrect_amount',
+            $key
+        );
+
+        $this->expectException(DomainException::class);
+
+        $this->financialExceptionReport(
+            'single',
+            $bank,
+            'wrong_source_reference',
+            $key
+        );
+    }
+
+    public function test_financial_exception_second_open_hold_is_rejected(): void
+    {
+        $bank = $this->bankSettlementClaim(
+            $this->settlementReadyCase()
+        );
+
+        $this->financialExceptionReport('single', $bank);
+
+        $this->expectException(DomainException::class);
+
+        $this->financialExceptionReport('single', $bank);
+    }
+
+    public function test_financial_exception_unprivileged_reviewer_is_rejected(): void
+    {
+        $bank = $this->bankSettlementClaim(
+            $this->settlementReadyCase()
+        );
+
+        $incident = $this->financialExceptionReport('single', $bank);
+
+        $this->actor(999);
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodFinancialExceptionService::class)->review(
+            $incident['exception_key'],
+            (string) Str::uuid(),
+            'hold_for_investigation',
+            'await_external_evidence'
+        );
+    }
+
+    public function test_financial_exception_reporter_cannot_self_review(): void
+    {
+        $bank = $this->bankSettlementClaim(
+            $this->settlementReadyCase()
+        );
+
+        $incident = $this->financialExceptionReport('single', $bank);
+
+        Gate::define(
+            CheckoutCodFinancialExceptionService::REVIEW_ABILITY,
+            static fn ($u): bool => in_array(
+                (int) $u->getAuthIdentifier(),
+                [2101, 2102],
+                true
+            )
+        );
+
+        $this->actor(2101);
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodFinancialExceptionService::class)->review(
+            $incident['exception_key'],
+            (string) Str::uuid(),
+            'hold_for_investigation',
+            'await_external_evidence'
+        );
+    }
+
+    public function test_financial_exception_bank_claim_author_cannot_review(): void
+    {
+        $bank = $this->bankSettlementClaim(
+            $this->settlementReadyCase()
+        );
+
+        $incident = $this->financialExceptionReport('single', $bank);
+
+        Gate::define(
+            CheckoutCodFinancialExceptionService::REVIEW_ABILITY,
+            static fn ($u): bool => in_array(
+                (int) $u->getAuthIdentifier(),
+                [1901, 2102],
+                true
+            )
+        );
+
+        $this->actor(1901);
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodFinancialExceptionService::class)->review(
+            $incident['exception_key'],
+            (string) Str::uuid(),
+            'hold_for_investigation',
+            'await_external_evidence'
+        );
+    }
+
+    public function test_financial_exception_independent_review_keeps_hold(): void
+    {
+        $bank = $this->bankSettlementClaim(
+            $this->settlementReadyCase()
+        );
+
+        $incident = $this->financialExceptionReport('single', $bank);
+        $review = $this->financialExceptionReview($incident);
+
+        $this->assertSame(
+            'hold_for_investigation',
+            $review['decision']
+        );
+
+        $this->assertFalse($review['refund_executed']);
+
+        $this->actor(1200);
+
+        $this->assertSame(
+            'investigation_hold',
+            app(CheckoutCodFinancialExceptionStatusService::class)
+                ->inspect('single', $bank['operation_key'])['status']
+        );
+    }
+
+    public function test_financial_exception_dismissal_releases_hold_and_allows_new_report(): void
+    {
+        $bank = $this->bankSettlementClaim(
+            $this->settlementReadyCase()
+        );
+
+        $incident = $this->financialExceptionReport('single', $bank);
+
+        $this->financialExceptionReview(
+            $incident,
+            'dismiss_report'
+        );
+
+        $this->actor(1200);
+
+        $status = app(CheckoutCodFinancialExceptionStatusService::class)
+            ->inspect('single', $bank['operation_key']);
+
+        $this->assertFalse($status['financial_hold']);
+        $this->assertSame('dismissed', $status['status']);
+
+        $new = $this->financialExceptionReport(
+            'single',
+            $bank,
+            'bank_reversal_reported'
+        );
+
+        $this->assertNotSame(
+            $incident['exception_key'],
+            $new['exception_key']
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_financial_exceptions',
+            2
+        );
+    }
+
+    public function test_financial_exception_review_exact_replay_is_idempotent(): void
+    {
+        $bank = $this->bankSettlementClaim(
+            $this->settlementReadyCase()
+        );
+
+        $incident = $this->financialExceptionReport('single', $bank);
+        $key = (string) Str::uuid();
+
+        $first = $this->financialExceptionReview(
+            $incident,
+            'dismiss_report',
+            $key
+        );
+
+        $this->assertSame(
+            $first,
+            $this->financialExceptionReview(
+                $incident,
+                'dismiss_report',
+                $key
+            )
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_financial_exception_reviews',
+            1
+        );
+    }
+
+    public function test_financial_exception_conflicting_second_review_is_rejected(): void
+    {
+        $bank = $this->bankSettlementClaim(
+            $this->settlementReadyCase()
+        );
+
+        $incident = $this->financialExceptionReport('single', $bank);
+
+        $this->financialExceptionReview($incident);
+
+        $this->expectException(DomainException::class);
+
+        $this->financialExceptionReview(
+            $incident,
+            'dismiss_report'
+        );
+    }
+
+    public function test_financial_exception_single_match_blocked_by_bank_hold(): void
+    {
+        [$case, $claim] = $this->bankSettlementReviewedClaim();
+
+        $bank = $this->bankSettlementClaim($case);
+
+        $this->financialExceptionReport('single', $bank);
+
+        $this->expectException(QueryException::class);
+
+        $this->bankSettlementMatch($claim, $bank);
+    }
+
+    public function test_financial_exception_single_match_allowed_after_dismissal(): void
+    {
+        [$case, $claim] = $this->bankSettlementReviewedClaim();
+
+        $bank = $this->bankSettlementClaim($case);
+
+        $incident = $this->financialExceptionReport('single', $bank);
+
+        $this->financialExceptionReview(
+            $incident,
+            'dismiss_report'
+        );
+
+        $match = $this->bankSettlementMatch($claim, $bank);
+
+        $this->assertSame(
+            'amounts_match_unverified',
+            $match['match_result']
+        );
+    }
+
+    public function test_financial_exception_novapay_hold_blocks_source_review(): void
+    {
+        $case = $this->settlementReadyCase();
+        $claim = $this->settlementClaim($case['case_key']);
+
+        $this->financialExceptionReport(
+            'novapay',
+            $claim,
+            'customer_return_reported'
+        );
+
+        $this->actor(1803);
+        $this->expectException(QueryException::class);
+
+        app(CheckoutCodSettlementReviewService::class)->review(
+            $claim['operation_key'],
+            (string) Str::uuid(),
+            'retain_unverified',
+            'external_confirmation_required'
+        );
+    }
+
+    public function test_financial_exception_novapay_hold_blocks_batch_allocation(): void
+    {
+        [$case, $claim] = $this->bankBatchSource();
+        $batch = $this->bankBatchCreate(680);
+
+        $this->financialExceptionReport(
+            'novapay',
+            $claim,
+            'order_cancellation_reported'
+        );
+
+        $this->expectException(QueryException::class);
+
+        $this->bankBatchAllocate($batch, $claim);
+    }
+
+    public function test_financial_exception_batch_hold_blocks_new_allocation(): void
+    {
+        [$case, $claim] = $this->bankBatchSource();
+        $batch = $this->bankBatchCreate(680);
+
+        $this->financialExceptionReport(
+            'batch',
+            $batch,
+            'bank_reversal_reported'
+        );
+
+        $this->expectException(QueryException::class);
+
+        $this->bankBatchAllocate($batch, $claim);
+    }
+
+    public function test_financial_exception_batch_reviewed_before_hold_shows_dispute(): void
+    {
+        [$case, $claim] = $this->bankBatchSource();
+
+        $batch = $this->bankBatchCreate(680);
+        $this->bankBatchAllocate($batch, $claim);
+
+        $this->actor(2003);
+
+        app(CheckoutCodBankBatchReviewService::class)->review(
+            $batch['operation_key'],
+            (string) Str::uuid()
+        );
+
+        $this->financialExceptionReport(
+            'batch',
+            $batch,
+            'bank_reversal_reported'
+        );
+
+        $this->actor(1200);
+
+        $status = app(CheckoutCodBankBatchStatusService::class)
+            ->inspect($batch['operation_key']);
+
+        $this->assertSame(
+            'financial_exception_hold',
+            $status['status']
+        );
+
+        $this->assertTrue(
+            $status['financial_exception_hold']
+        );
+
+        $this->assertFalse(
+            $status['funds_received_verified']
+        );
+
+        $this->assertSame(
+            'financial_exception_hold',
+            app(CheckoutCodSettlementBankStatusService::class)
+                ->inspect($this->orderKey)['status']
+        );
+    }
+
+    public function test_financial_exception_batch_cannot_be_reviewed_during_hold(): void
+    {
+        [$case, $claim] = $this->bankBatchSource();
+
+        $batch = $this->bankBatchCreate();
+        $this->bankBatchAllocate($batch, $claim);
+
+        $this->financialExceptionReport(
+            'batch',
+            $batch,
+            'wrong_source_reference'
+        );
+
+        $this->actor(2003);
+        $this->expectException(QueryException::class);
+
+        app(CheckoutCodBankBatchReviewService::class)->review(
+            $batch['operation_key'],
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_financial_exception_history_cannot_be_modified(): void
+    {
+        $batch = $this->bankBatchCreate();
+
+        $incident = $this->financialExceptionReport(
+            'batch',
+            $batch
+        );
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_financial_exceptions')
+            ->where('id', $incident['id'])
+            ->update([
+                'reason_code' => 'wrong_source_reference',
+            ]);
+    }
+
+    public function test_financial_exception_queue_redacts_references(): void
+    {
+        $bank = $this->bankSettlementClaim(
+            $this->settlementReadyCase(),
+            680,
+            'EXCEPTION_PRIVATE_REF_1'
+        );
+
+        $this->financialExceptionReport('single', $bank);
+
+        $this->actor(1200);
+
+        $queue = app(CheckoutCodFinancialExceptionQueueService::class)
+            ->recent();
+
+        $this->assertCount(1, $queue['items']);
+
+        $json = json_encode($queue, JSON_THROW_ON_ERROR);
+
+        foreach ([
+                     'EXCEPTION_PRIVATE_REF_1',
+                     'Петренко',
+                     '380671234567',
+                 ] as $secret) {
+            $this->assertStringNotContainsString(
+                $secret,
+                $json
+            );
+        }
+
+        $this->assertFalse(
+            $queue['automatic_settlement_allowed']
+        );
+    }
+
+    public function test_financial_exception_status_and_queue_require_read_permission(): void
+    {
+        $this->actor(999);
+
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodFinancialExceptionQueueService::class)
+            ->recent();
+    }
+
+    public function test_financial_exception_does_not_touch_payment_status_or_refund(): void
+    {
+        $case = $this->settlementReadyCase();
+        $bank = $this->bankSettlementClaim($case);
+
+        $incident = $this->financialExceptionReport(
+            'single',
+            $bank,
+            'customer_return_reported'
+        );
+
+        $review = $this->financialExceptionReview($incident);
+
+        $this->assertFalse($review['cod_paid']);
+        $this->assertFalse($review['refund_executed']);
+
+        $this->assertSame(
+            'pending',
+            DB::table('orders')
+                ->where('order_key', $this->orderKey)
+                ->value('payment_status')
+        );
     }
 
 }

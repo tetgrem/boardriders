@@ -52,17 +52,30 @@ final class CheckoutCodBankBatchStatusService
             ->where('batch_id', $batch->id)
             ->first(['decision', 'reviewed_by']);
 
+
+        $financialHold = app(
+            CheckoutCodFinancialExceptionStatusService::class
+        )->hasBatchHold((int) $batch->id);
+
+        $status = $review === null
+            ? (
+            (int) $totals->count === 0
+                ? 'awaiting_allocations'
+                : 'awaiting_independent_review'
+            )
+            : 'reviewed_external_confirmation_required';
+
+        if ($financialHold) {
+            $status = 'financial_exception_hold';
+        }
+
+
         return array_merge($view, [
             'batch_id' => (int) $batch->id,
             'operation_key' => (string) $batch->operation_key,
             'currency_code' => 'UAH',
-            'status' => $review === null
-                ? (
-                (int) $totals->count === 0
-                    ? 'awaiting_allocations'
-                    : 'awaiting_independent_review'
-                )
-                : 'reviewed_external_confirmation_required',
+            'status' => $status,
+            'financial_exception_hold' => $financialHold,
             'review_decision' => $review?->decision,
             'sealed' => $review !== null,
         ]);
