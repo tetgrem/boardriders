@@ -3,6 +3,17 @@
 namespace Tests\Feature;
 
 
+use App\Services\Pricing\CheckoutCodBankEvidenceVerifier;
+use App\Services\Pricing\CheckoutCodBankEvidenceStatusService;
+
+use App\Services\Pricing\CheckoutCodPrivatStatementImportService;
+
+use App\Services\Pricing\CheckoutCodFinancialResolutionService;
+use App\Services\Pricing\CheckoutCodFinancialResolutionStatusService;
+
+use App\Services\Pricing\CheckoutCodFinancialGatewaySignature;
+use App\Services\Pricing\CheckoutCodFinancialGatewayStatusService;
+
 use App\Services\Pricing\CheckoutCodBankBatchService;
 use App\Services\Pricing\CheckoutCodBankBatchAllocationService;
 use App\Services\Pricing\CheckoutCodBankBatchReviewService;
@@ -116,6 +127,9 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
     private array $documentRows = [];
 
     private bool $trackingShouldFail = false;
+
+    private ?array $privatStatement30Fixture = null;
+
 
     private array $trackingRows = [
         [
@@ -365,6 +379,27 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
                 (int) $user->getAuthIdentifier() === 2102
         );
 
+        Gate::define(
+            CheckoutCodFinancialResolutionService::EVIDENCE_ABILITY,
+            static fn ($user): bool => in_array(
+                (int) $user->getAuthIdentifier(),
+                [2201, 2202],
+                true
+            )
+        );
+
+        Gate::define(
+            CheckoutCodFinancialResolutionService::PROPOSE_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 2203
+        );
+
+        Gate::define(
+            CheckoutCodFinancialResolutionService::REVIEW_ABILITY,
+            static fn ($user): bool =>
+                (int) $user->getAuthIdentifier() === 2204
+        );
+
     }
 
     protected function tearDown(): void
@@ -408,8 +443,23 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
         app(CheckoutCodPackageAssessmentService::class)->assess(
             $this->orderKey, (string) Str::uuid(), 300, 200, 100
         );
+
         Http::fake(function (ProviderRequest $request) {
+            if (
+                $this->privatStatement30Fixture !== null
+                && str_starts_with(
+                    $request->url(),
+                    'https://acp.privatbank.ua/api/statements/transactions'
+                )
+            ) {
+                return Http::response(
+                    $this->privatStatement30Fixture,
+                    200
+                );
+            }
+
             $method = $request->data()['calledMethod'] ?? null;
+
 
             if ($method === 'getStatusDocuments') {
                 if ($this->trackingShouldFail) {
@@ -4580,6 +4630,1963 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
             DB::table('orders')
                 ->where('order_key', $this->orderKey)
                 ->value('payment_status')
+        );
+    }
+
+    /** @return array{0:array,1:array,2:array} */
+    private function resolutionCase(
+        bool $independentlyHeld = true,
+        string $reason = 'incorrect_amount'
+    ): array {
+        $case = $this->settlementReadyCase();
+        $bank = $this->bankSettlementClaim($case);
+
+        $incident = $this->financialExceptionReport(
+            'single',
+            $bank,
+            $reason
+        );
+
+        if ($independentlyHeld) {
+            $this->financialExceptionReview($incident);
+        }
+
+        return [$case, $bank, $incident];
+    }
+
+    private function resolutionEvidence(
+        array $incident,
+        int $actor,
+        string $kind,
+        string $seed
+    ): array {
+        $this->actor($actor);
+
+        return app(CheckoutCodFinancialResolutionService::class)
+            ->addEvidence(
+                $incident['exception_key'],
+                (string) Str::uuid(),
+                $kind,
+                hash(
+                    'sha256',
+                    $incident['exception_key'] . $seed
+                )
+            );
+    }
+
+    private function resolutionTwoSources(array $incident): void
+    {
+        $this->resolutionEvidence(
+            $incident,
+            2201,
+            'bank_notice_claim',
+            'notice'
+        );
+
+        $this->resolutionEvidence(
+            $incident,
+            2202,
+            'internal_reconciliation',
+            'accounting'
+        );
+    }
+
+    private function resolutionProposal(
+        array $incident,
+        int $recommended = 600,
+        string $kind = 'amount_correction',
+        ?string $key = null
+    ): array {
+        $this->actor(2203);
+
+        return app(CheckoutCodFinancialResolutionService::class)
+            ->propose(
+                $incident['exception_key'],
+                $key ?? (string) Str::uuid(),
+                $kind,
+                $recommended
+            );
+    }
+
+    private function resolutionReview(
+        array $proposal,
+        string $decision = 'ready_for_external_verification',
+        ?string $key = null
+    ): array {
+        $this->actor(2204);
+
+        return app(CheckoutCodFinancialResolutionService::class)
+            ->review(
+                $proposal['operation_key'],
+                $key ?? (string) Str::uuid(),
+                $decision,
+                $decision === 'return_for_rework'
+                    ? 'insufficient_consistency'
+                    : 'recommendation_documented'
+            );
+    }
+
+    public function test_financial_resolution_evidence_requires_investigation_hold(): void
+    {
+        [, , $incident] = $this->resolutionCase(false);
+
+        $this->actor(2201);
+        $this->expectException(QueryException::class);
+
+        app(CheckoutCodFinancialResolutionService::class)
+            ->addEvidence(
+                $incident['exception_key'],
+                (string) Str::uuid(),
+                'bank_notice_claim',
+                str_repeat('a', 64)
+            );
+    }
+
+    public function test_financial_resolution_two_evidence_records_are_append_only_claims(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+        $this->resolutionTwoSources($incident);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_exception_evidence',
+            2
+        );
+
+        $this->actor(1200);
+
+        $status = app(
+            CheckoutCodFinancialResolutionStatusService::class
+        )->inspect($incident['exception_key']);
+
+        $this->assertSame(
+            'evidence_ready_for_proposal',
+            $status['status']
+        );
+        $this->assertTrue($status['financial_hold']);
+        $this->assertFalse(
+            $status['bank_source_authenticated']
+        );
+    }
+
+    public function test_financial_resolution_evidence_uuid_replay_is_idempotent(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->actor(2201);
+        $key = (string) Str::uuid();
+
+        $svc = app(CheckoutCodFinancialResolutionService::class);
+        $digest = str_repeat('a', 64);
+
+        $first = $svc->addEvidence(
+            $incident['exception_key'],
+            $key,
+            'bank_notice_claim',
+            $digest
+        );
+
+        $this->assertSame(
+            $first,
+            $svc->addEvidence(
+                $incident['exception_key'],
+                $key,
+                'bank_notice_claim',
+                $digest
+            )
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_exception_evidence',
+            1
+        );
+    }
+
+    public function test_financial_resolution_reused_evidence_digest_is_rejected(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->resolutionEvidence(
+            $incident,
+            2201,
+            'bank_notice_claim',
+            'same'
+        );
+
+        $this->expectException(DomainException::class);
+
+        $this->resolutionEvidence(
+            $incident,
+            2202,
+            'internal_reconciliation',
+            'same'
+        );
+    }
+
+    public function test_financial_resolution_evidence_needs_permission(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->actor(999);
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodFinancialResolutionService::class)
+            ->addEvidence(
+                $incident['exception_key'],
+                (string) Str::uuid(),
+                'bank_notice_claim',
+                str_repeat('b', 64)
+            );
+    }
+
+    public function test_financial_resolution_reporter_cannot_submit_evidence_even_with_gate(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        Gate::define(
+            CheckoutCodFinancialResolutionService::EVIDENCE_ABILITY,
+            static fn ($u): bool => in_array(
+                (int) $u->getAuthIdentifier(),
+                [2101, 2201, 2202],
+                true
+            )
+        );
+
+        $this->actor(2101);
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodFinancialResolutionService::class)
+            ->addEvidence(
+                $incident['exception_key'],
+                (string) Str::uuid(),
+                'bank_notice_claim',
+                str_repeat('b', 64)
+            );
+    }
+
+    public function test_financial_resolution_proposal_requires_two_evidence_authors(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->resolutionEvidence(
+            $incident,
+            2201,
+            'bank_notice_claim',
+            'one'
+        );
+
+        $this->resolutionEvidence(
+            $incident,
+            2201,
+            'internal_reconciliation',
+            'two'
+        );
+
+        $this->expectException(DomainException::class);
+
+        $this->resolutionProposal($incident);
+    }
+
+    public function test_financial_resolution_proposal_requires_distinct_evidence_kinds(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->resolutionEvidence(
+            $incident,
+            2201,
+            'bank_notice_claim',
+            'one'
+        );
+
+        $this->resolutionEvidence(
+            $incident,
+            2202,
+            'bank_notice_claim',
+            'two'
+        );
+
+        $this->expectException(DomainException::class);
+
+        $this->resolutionProposal($incident);
+    }
+
+    public function test_financial_resolution_correction_is_signed_kopiyka_advice_only(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->resolutionTwoSources($incident);
+
+        $proposal = $this->resolutionProposal($incident);
+
+        $this->assertSame(
+            680,
+            $proposal['source_net_minor']
+        );
+
+        $this->assertSame(
+            600,
+            $proposal['recommended_net_minor']
+        );
+
+        $this->assertSame(
+            -80,
+            $proposal['delta_minor']
+        );
+
+        $this->assertFalse($proposal['refund_executed']);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_exception_proposals',
+            1
+        );
+    }
+
+    public function test_financial_resolution_proposal_replay_is_idempotent(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->resolutionTwoSources($incident);
+
+        $key = (string) Str::uuid();
+
+        $first = $this->resolutionProposal(
+            $incident,
+            600,
+            'amount_correction',
+            $key
+        );
+
+        $this->assertSame(
+            $first,
+            $this->resolutionProposal(
+                $incident,
+                600,
+                'amount_correction',
+                $key
+            )
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_exception_proposals',
+            1
+        );
+    }
+
+    public function test_financial_resolution_second_active_proposal_is_rejected(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->resolutionTwoSources($incident);
+        $this->resolutionProposal($incident);
+
+        $this->expectException(DomainException::class);
+
+        $this->resolutionProposal($incident, 500);
+    }
+
+    public function test_financial_resolution_evidence_freezes_during_proposal(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->resolutionTwoSources($incident);
+        $this->resolutionProposal($incident);
+
+        $this->expectException(DomainException::class);
+
+        $this->resolutionEvidence(
+            $incident,
+            2201,
+            'novapay_notice_claim',
+            'late'
+        );
+    }
+
+    public function test_financial_resolution_proposer_cannot_be_evidence_author(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->resolutionTwoSources($incident);
+
+        Gate::define(
+            CheckoutCodFinancialResolutionService::PROPOSE_ABILITY,
+            static fn ($u): bool => in_array(
+                (int) $u->getAuthIdentifier(),
+                [2201, 2203],
+                true
+            )
+        );
+
+        $this->actor(2201);
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodFinancialResolutionService::class)
+            ->propose(
+                $incident['exception_key'],
+                (string) Str::uuid(),
+                'amount_correction',
+                600
+            );
+    }
+
+    public function test_financial_resolution_reviewer_requires_permission(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->resolutionTwoSources($incident);
+        $proposal = $this->resolutionProposal($incident);
+
+        $this->actor(999);
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodFinancialResolutionService::class)
+            ->review(
+                $proposal['operation_key'],
+                (string) Str::uuid(),
+                'ready_for_external_verification',
+                'recommendation_documented'
+            );
+    }
+
+    public function test_financial_resolution_proposer_cannot_review_own_proposal(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->resolutionTwoSources($incident);
+        $proposal = $this->resolutionProposal($incident);
+
+        Gate::define(
+            CheckoutCodFinancialResolutionService::REVIEW_ABILITY,
+            static fn ($u): bool => in_array(
+                (int) $u->getAuthIdentifier(),
+                [2203, 2204],
+                true
+            )
+        );
+
+        $this->actor(2203);
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodFinancialResolutionService::class)
+            ->review(
+                $proposal['operation_key'],
+                (string) Str::uuid(),
+                'ready_for_external_verification',
+                'recommendation_documented'
+            );
+    }
+
+    public function test_financial_resolution_review_is_not_funds_or_refund(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->resolutionTwoSources($incident);
+        $proposal = $this->resolutionProposal($incident);
+
+        $decision = $this->resolutionReview($proposal);
+
+        $this->assertSame(
+            'ready_for_external_verification',
+            $decision['decision']
+        );
+
+        $this->assertFalse(
+            $decision['financial_hold_released']
+        );
+        $this->assertFalse($decision['refund_executed']);
+
+        $this->actor(1200);
+
+        $status = app(
+            CheckoutCodFinancialResolutionStatusService::class
+        )->inspect($incident['exception_key']);
+
+        $this->assertSame(
+            'recommendation_awaiting_external_verification',
+            $status['status']
+        );
+
+        $this->assertTrue($status['financial_hold']);
+
+        $this->assertSame(
+            'pending',
+            DB::table('orders')
+                ->where('order_key', $this->orderKey)
+                ->value('payment_status')
+        );
+    }
+
+    public function test_financial_resolution_review_uuid_replay_is_idempotent(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->resolutionTwoSources($incident);
+        $proposal = $this->resolutionProposal($incident);
+
+        $key = (string) Str::uuid();
+
+        $first = $this->resolutionReview(
+            $proposal,
+            'ready_for_external_verification',
+            $key
+        );
+
+        $this->assertSame(
+            $first,
+            $this->resolutionReview(
+                $proposal,
+                'ready_for_external_verification',
+                $key
+            )
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_exception_proposal_reviews',
+            1
+        );
+    }
+
+    public function test_financial_resolution_return_for_rework_allows_revised_proposal(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->resolutionTwoSources($incident);
+
+        $first = $this->resolutionProposal($incident);
+
+        $this->resolutionReview(
+            $first,
+            'return_for_rework'
+        );
+
+        $this->resolutionEvidence(
+            $incident,
+            2201,
+            'novapay_notice_claim',
+            'new-evidence'
+        );
+
+        $second = $this->resolutionProposal(
+            $incident,
+            500
+        );
+
+        $this->assertNotSame(
+            $first['operation_key'],
+            $second['operation_key']
+        );
+
+        $this->assertSame(
+            3,
+            $second['evidence_count']
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_exception_proposals',
+            2
+        );
+
+        $this->actor(1200);
+
+        $this->assertSame(
+            'proposal_awaiting_independent_review',
+            app(CheckoutCodFinancialResolutionStatusService::class)
+                ->inspect($incident['exception_key'])['status']
+        );
+    }
+
+    public function test_financial_resolution_database_evidence_is_immutable(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $evidence = $this->resolutionEvidence(
+            $incident,
+            2201,
+            'bank_notice_claim',
+            'immutable'
+        );
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_exception_evidence')
+            ->where('id', $evidence['id'])
+            ->update([
+                'evidence_kind' => 'internal_reconciliation',
+            ]);
+    }
+
+    public function test_financial_resolution_queue_is_redacted_and_paginated(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->resolutionTwoSources($incident);
+
+        $this->actor(1200);
+
+        $service = app(
+            CheckoutCodFinancialResolutionStatusService::class
+        );
+
+        $queue = $service->recent(1);
+
+        $this->assertCount(1, $queue['items']);
+        $this->assertFalse(
+            $queue['funds_received_verified']
+        );
+
+        $this->assertSame(
+            'evidence_ready_for_proposal',
+            $queue['items'][0]['status']
+        );
+
+        $json = json_encode(
+            $queue,
+            JSON_THROW_ON_ERROR
+        );
+
+        foreach ([
+                     'Петренко',
+                     '380671234567',
+                     'ttn-gate-test-key',
+                 ] as $secret) {
+            $this->assertStringNotContainsString(
+                $secret,
+                $json
+            );
+        }
+    }
+
+    public function test_financial_resolution_read_permission_is_required(): void
+    {
+        $this->actor(999);
+
+        $this->expectException(
+            AuthorizationException::class
+        );
+
+        app(CheckoutCodFinancialResolutionStatusService::class)
+            ->recent();
+    }
+
+    public function test_financial_resolution_reversal_advice_cannot_execute_reversal(): void
+    {
+        [, , $incident] = $this->resolutionCase(
+            true,
+            'bank_reversal_reported'
+        );
+
+        $this->resolutionTwoSources($incident);
+
+        $proposal = $this->resolutionProposal(
+            $incident,
+            0,
+            'reported_reversal'
+        );
+
+        $this->assertSame(
+            -680,
+            $proposal['delta_minor']
+        );
+
+        $this->resolutionReview($proposal);
+
+        $this->assertSame(
+            'pending',
+            DB::table('orders')
+                ->where('order_key', $this->orderKey)
+                ->value('payment_status')
+        );
+    }
+
+    public function test_financial_resolution_return_followup_does_not_post_refund(): void
+    {
+        [, , $incident] = $this->resolutionCase(
+            true,
+            'customer_return_reported'
+        );
+
+        $this->resolutionTwoSources($incident);
+
+        $proposal = $this->resolutionProposal(
+            $incident,
+            680,
+            'return_case_followup'
+        );
+
+        $this->assertSame(
+            0,
+            $proposal['delta_minor']
+        );
+
+        $this->assertFalse(
+            $proposal['refund_executed']
+        );
+    }
+
+    public function test_financial_resolution_database_rejects_forged_proposal_without_evidence(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_exception_proposals')->insert([
+            'operation_key' => (string) Str::uuid(),
+            'exception_id' => $incident['id'],
+            'recommendation_kind' => 'amount_correction',
+            'source_net_minor' => 680,
+            'recommended_net_minor' => 600,
+            'delta_minor' => -80,
+            'evidence_count' => 2,
+            'proposed_by' => 2203,
+            'request_hmac' => str_repeat('a', 64),
+            'created_at' => now(),
+        ]);
+    }
+
+    public function test_financial_resolution_reviewer_cannot_be_evidence_collector(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->resolutionTwoSources($incident);
+        $proposal = $this->resolutionProposal($incident);
+
+        Gate::define(
+            CheckoutCodFinancialResolutionService::REVIEW_ABILITY,
+            static fn ($u): bool => in_array(
+                (int) $u->getAuthIdentifier(),
+                [2201, 2204],
+                true
+            )
+        );
+
+        $this->actor(2201);
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodFinancialResolutionService::class)
+            ->review(
+                $proposal['operation_key'],
+                (string) Str::uuid(),
+                'ready_for_external_verification',
+                'recommendation_documented'
+            );
+    }
+
+    public function test_financial_resolution_reworked_proposal_old_uuid_replays_after_new_evidence(): void
+    {
+        [, , $incident] = $this->resolutionCase();
+
+        $this->resolutionTwoSources($incident);
+
+        $key = (string) Str::uuid();
+
+        $first = $this->resolutionProposal(
+            $incident,
+            600,
+            'amount_correction',
+            $key
+        );
+
+        $this->resolutionReview(
+            $first,
+            'return_for_rework'
+        );
+
+        $this->resolutionEvidence(
+            $incident,
+            2201,
+            'novapay_notice_claim',
+            'late'
+        );
+
+        $this->assertSame(
+            $first,
+            $this->resolutionProposal(
+                $incident,
+                600,
+                'amount_correction',
+                $key
+            )
+        );
+    }
+
+    public function test_financial_resolution_batch_reallocation_remains_a_proposal(): void
+    {
+        [, $claim] = $this->bankBatchSource();
+        $batch = $this->bankBatchCreate(680);
+
+        $incident = $this->financialExceptionReport(
+            'batch',
+            $batch,
+            'wrong_source_reference'
+        );
+
+        $this->financialExceptionReview($incident);
+        $this->resolutionTwoSources($incident);
+
+        $proposal = $this->resolutionProposal(
+            $incident,
+            680,
+            'batch_reallocation'
+        );
+
+        $this->assertSame(
+            0,
+            $proposal['delta_minor']
+        );
+
+        $this->resolutionReview($proposal);
+        $this->actor(1200);
+
+        $this->assertTrue(
+            app(CheckoutCodFinancialResolutionStatusService::class)
+                ->inspect($incident['exception_key'])['financial_hold']
+        );
+    }
+
+    public function test_financial_resolution_novapay_claim_can_be_investigated_without_payment(): void
+    {
+        [, $claim] = $this->bankBatchSource();
+
+        $incident = $this->financialExceptionReport(
+            'novapay',
+            $claim
+        );
+
+        $this->financialExceptionReview($incident);
+        $this->resolutionTwoSources($incident);
+
+        $proposal = $this->resolutionProposal(
+            $incident,
+            620
+        );
+
+        $this->assertSame(
+            -60,
+            $proposal['delta_minor']
+        );
+
+        $this->resolutionReview($proposal);
+
+        $this->assertSame(
+            'pending',
+            DB::table('orders')
+                ->where('order_key', $this->orderKey)
+                ->value('payment_status')
+        );
+    }
+
+    /**
+     * Signed first-party gateway request.
+     * No bank-native attestation implied.
+     */
+    private function gateway28Post(
+        array $payload,
+        ?string $nonce = null,
+        ?int $timestamp = null,
+        ?string $signedBody = null,
+        ?string $sentBody = null,
+        string $keyId = 'primary'
+    ): \Illuminate\Testing\TestResponse {
+        $secret = 'gateway-test-secret-which-is-longer-than-32-chars';
+
+        config()->set(
+            'services.cod_financial_gateway.enabled',
+            true
+        );
+
+        config()->set(
+            'services.cod_financial_gateway.keys',
+            [
+                'primary' => $secret,
+                'secondary' => $secret . '-rotated',
+            ]
+        );
+
+        $body = json_encode(
+            $payload,
+            JSON_THROW_ON_ERROR
+        );
+
+        $signedBody ??= $body;
+        $sentBody ??= $body;
+        $nonce ??= (string) Str::uuid();
+        $timestamp ??= now()->timestamp;
+
+        $stamp = (string) $timestamp;
+
+        $keySecret = $keyId === 'secondary'
+            ? $secret . '-rotated'
+            : $secret;
+
+        $sig = app(
+            CheckoutCodFinancialGatewaySignature::class
+        )->sign(
+            $keyId,
+            $stamp,
+            $nonce,
+            $signedBody,
+            $keySecret
+        );
+
+        return $this->call(
+            'POST',
+            '/api/v1/cod/financial-gateway/ingest',
+            [],
+            [],
+            [],
+            [
+                'CONTENT_TYPE' => 'application/json',
+                'HTTP_ACCEPT' => 'application/json',
+                'HTTP_X_COD_GATEWAY_KEY' => $keyId,
+                'HTTP_X_COD_GATEWAY_TIMESTAMP' => $stamp,
+                'HTTP_X_COD_GATEWAY_NONCE' => $nonce,
+                'HTTP_X_COD_GATEWAY_SIGNATURE' => $sig,
+            ],
+            $sentBody
+        );
+    }
+
+    private function gateway28Payload(
+        string $reference = 'GW_REF_UNMATCHED_1001',
+        string $kind = 'credit_reported',
+        int $amount = 680,
+        ?string $eventKey = null
+    ): array {
+        return [
+            'event_key' => $eventKey ?? (string) Str::uuid(),
+            'event_kind' => $kind,
+            'bank_reference' => $reference,
+            'net_minor' => $amount,
+            'currency_code' => 'UAH',
+        ];
+    }
+
+    public function test_cod_gateway28_disabled_by_default_is_fail_closed(): void
+    {
+        config()->set(
+            'services.cod_financial_gateway.enabled',
+            false
+        );
+
+        $this->assertSame(
+            false,
+            config('services.cod_financial_gateway.enabled')
+        );
+
+        $this->postJson(
+            '/api/v1/cod/financial-gateway/ingest',
+            $this->gateway28Payload()
+        )->assertUnauthorized();
+
+        $this->assertDatabaseCount(
+            'checkout_cod_gateway_reports',
+            0
+        );
+    }
+
+    public function test_cod_gateway28_accepts_signed_unmatched_report_without_payment(): void
+    {
+        $response = $this->gateway28Post(
+            $this->gateway28Payload()
+        );
+
+        $response
+            ->assertStatus(202)
+            ->assertJsonPath(
+                'bank_origin_authenticated',
+                false
+            )
+            ->assertJsonPath(
+                'funds_received_verified',
+                false
+            )
+            ->assertJsonPath(
+                'cod_paid',
+                false
+            );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_gateway_nonces',
+            1
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_gateway_reports',
+            1
+        );
+
+        $this->assertSame(
+            'pending',
+            DB::table('orders')
+                ->where('order_key', $this->orderKey)
+                ->value('payment_status')
+        );
+    }
+
+    public function test_cod_gateway28_correlates_with_single_cod_bank_claim(): void
+    {
+        $case = $this->settlementReadyCase();
+
+        $bank = $this->bankSettlementClaim(
+            $case,
+            680,
+            'GW_REF_SINGLE_1001'
+        );
+
+        $this->gateway28Post(
+            $this->gateway28Payload(
+                'GW_REF_SINGLE_1001'
+            )
+        )->assertStatus(202);
+
+        $this->actor(1200);
+
+        $status = app(
+            CheckoutCodFinancialGatewayStatusService::class
+        )->inspect(
+            'single',
+            $bank['operation_key']
+        );
+
+        $this->assertSame(
+            'gateway_claim_correlated_unverified',
+            $status['status']
+        );
+
+        $this->assertSame(
+            1,
+            $status['credit_reports_count']
+        );
+
+        $this->assertFalse(
+            $status['bank_origin_authenticated']
+        );
+    }
+
+    public function test_cod_gateway28_correlates_with_batch_claim(): void
+    {
+        $batch = $this->bankBatchCreate(
+            1360,
+            'GW_REF_BATCH_1001'
+        );
+
+        $this->gateway28Post(
+            $this->gateway28Payload(
+                'GW_REF_BATCH_1001',
+                'credit_reported',
+                1360
+            )
+        )->assertStatus(202);
+
+        $this->actor(1200);
+
+        $status = app(
+            CheckoutCodFinancialGatewayStatusService::class
+        )->inspect(
+            'batch',
+            $batch['operation_key']
+        );
+
+        $this->assertSame(
+            'gateway_claim_correlated_unverified',
+            $status['status']
+        );
+
+        $this->assertFalse($status['cod_paid']);
+    }
+
+    public function test_cod_gateway28_tampered_raw_body_is_rejected(): void
+    {
+        $data = $this->gateway28Payload();
+
+        $this->gateway28Post(
+            $data,
+            signedBody: json_encode(
+                $data,
+                JSON_THROW_ON_ERROR
+            ),
+            sentBody: json_encode(
+                array_merge(
+                    $data,
+                    ['net_minor' => 681]
+                ),
+                JSON_THROW_ON_ERROR
+            )
+        )->assertUnauthorized();
+
+        $this->assertDatabaseCount(
+            'checkout_cod_gateway_reports',
+            0
+        );
+    }
+
+    public function test_cod_gateway28_expired_signature_is_rejected(): void
+    {
+        $this->gateway28Post(
+            $this->gateway28Payload(),
+            timestamp: now()->timestamp - 301
+        )->assertUnauthorized();
+
+        $this->assertDatabaseCount(
+            'checkout_cod_gateway_reports',
+            0
+        );
+    }
+
+    public function test_cod_gateway28_future_signature_is_rejected(): void
+    {
+        $this->gateway28Post(
+            $this->gateway28Payload(),
+            timestamp: now()->timestamp + 301
+        )->assertUnauthorized();
+    }
+
+    public function test_cod_gateway28_unknown_key_is_rejected(): void
+    {
+        $this->gateway28Post(
+            $this->gateway28Payload(),
+            keyId: 'unknown'
+        )->assertUnauthorized();
+    }
+
+    public function test_cod_gateway28_replayed_nonce_is_rejected(): void
+    {
+        $nonce = (string) Str::uuid();
+        $data = $this->gateway28Payload();
+
+        $this->gateway28Post(
+            $data,
+            nonce: $nonce
+        )->assertStatus(202);
+
+        $this->gateway28Post(
+            $data,
+            nonce: $nonce
+        )->assertStatus(409);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_gateway_nonces',
+            1
+        );
+    }
+
+    public function test_cod_gateway28_same_event_new_nonce_is_idempotent(): void
+    {
+        $data = $this->gateway28Payload();
+
+        $this->gateway28Post($data)
+            ->assertStatus(202)
+            ->assertJsonPath('duplicate_event', false);
+
+        $this->gateway28Post($data)
+            ->assertStatus(202)
+            ->assertJsonPath('duplicate_event', true);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_gateway_reports',
+            1
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_gateway_nonces',
+            2
+        );
+    }
+
+    public function test_cod_gateway28_event_uuid_collision_with_new_body_is_rejected(): void
+    {
+        $data = $this->gateway28Payload();
+
+        $this->gateway28Post($data)
+            ->assertStatus(202);
+
+        $data['net_minor'] = 681;
+
+        $this->gateway28Post($data)
+            ->assertStatus(409);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_gateway_reports',
+            1
+        );
+    }
+
+    public function test_cod_gateway28_secondary_key_rotation_is_supported(): void
+    {
+        $this->gateway28Post(
+            $this->gateway28Payload(),
+            keyId: 'secondary'
+        )->assertStatus(202);
+
+        $this->assertDatabaseHas(
+            'checkout_cod_gateway_reports',
+            ['key_id' => 'secondary']
+        );
+    }
+
+    public function test_cod_gateway28_signed_invalid_amount_is_rejected(): void
+    {
+        $data = $this->gateway28Payload();
+        $data['net_minor'] = -1;
+
+        $this->gateway28Post($data)
+            ->assertStatus(422);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_gateway_reports',
+            0
+        );
+    }
+
+    public function test_cod_gateway28_amount_discrepancy_is_never_payment_proof(): void
+    {
+        $case = $this->settlementReadyCase();
+
+        $bank = $this->bankSettlementClaim(
+            $case,
+            680,
+            'GW_REF_DIFF_1001'
+        );
+
+        $this->gateway28Post(
+            $this->gateway28Payload(
+                'GW_REF_DIFF_1001',
+                'credit_reported',
+                500
+            )
+        )->assertStatus(202);
+
+        $this->actor(1200);
+
+        $status = app(
+            CheckoutCodFinancialGatewayStatusService::class
+        )->inspect(
+            'single',
+            $bank['operation_key']
+        );
+
+        $this->assertSame(
+            'signed_amount_discrepancy_unverified',
+            $status['status']
+        );
+
+        $this->assertSame(
+            1,
+            $status['amount_mismatches_count']
+        );
+
+        $this->assertFalse(
+            $status['funds_received_verified']
+        );
+    }
+
+    public function test_cod_gateway28_reversal_blocks_new_single_matching(): void
+    {
+        [$case, $claim] = $this->bankSettlementReviewedClaim();
+
+        $bank = $this->bankSettlementClaim(
+            $case,
+            680,
+            'GW_REF_REV_SINGLE_1'
+        );
+
+        $this->gateway28Post(
+            $this->gateway28Payload(
+                'GW_REF_REV_SINGLE_1',
+                'reversal_reported'
+            )
+        )->assertStatus(202);
+
+        $this->expectException(QueryException::class);
+
+        $this->bankSettlementMatch($claim, $bank);
+    }
+
+    public function test_cod_gateway28_reversal_blocks_new_batch_allocation(): void
+    {
+        [, $claim] = $this->bankBatchSource();
+
+        $batch = $this->bankBatchCreate(
+            680,
+            'GW_REF_REV_BATCH_1'
+        );
+
+        $this->gateway28Post(
+            $this->gateway28Payload(
+                'GW_REF_REV_BATCH_1',
+                'reversal_reported'
+            )
+        )->assertStatus(202);
+
+        $this->expectException(QueryException::class);
+
+        $this->bankBatchAllocate($batch, $claim);
+    }
+
+    public function test_cod_gateway28_unmatched_report_can_correlate_later(): void
+    {
+        $this->gateway28Post(
+            $this->gateway28Payload(
+                'GW_REF_LATER_1001'
+            )
+        )->assertStatus(202);
+
+        $case = $this->settlementReadyCase();
+
+        $bank = $this->bankSettlementClaim(
+            $case,
+            680,
+            'GW_REF_LATER_1001'
+        );
+
+        $this->actor(1200);
+
+        $status = app(
+            CheckoutCodFinancialGatewayStatusService::class
+        )->inspect(
+            'single',
+            $bank['operation_key']
+        );
+
+        $this->assertSame(
+            1,
+            $status['signed_reports_count']
+        );
+
+        $this->assertSame(
+            'gateway_claim_correlated_unverified',
+            $status['status']
+        );
+    }
+
+    public function test_cod_gateway28_inbox_redacts_external_bank_reference(): void
+    {
+        $this->gateway28Post(
+            $this->gateway28Payload(
+                'GW_REF_PRIVATE_1001'
+            )
+        )->assertStatus(202);
+
+        $this->actor(1200);
+
+        $queue = app(
+            CheckoutCodFinancialGatewayStatusService::class
+        )->recent();
+
+        $this->assertCount(
+            1,
+            $queue['items']
+        );
+
+        $json = json_encode(
+            $queue,
+            JSON_THROW_ON_ERROR
+        );
+
+        $this->assertStringNotContainsString(
+            'GW_REF_PRIVATE_1001',
+            $json
+        );
+
+        $this->assertStringNotContainsString(
+            'Петренко',
+            $json
+        );
+
+        $this->assertFalse(
+            $queue['automatic_settlement_allowed']
+        );
+    }
+
+    public function test_cod_gateway28_reader_permissions_are_enforced(): void
+    {
+        $this->actor(999);
+
+        $this->expectException(
+            AuthorizationException::class
+        );
+
+        app(
+            CheckoutCodFinancialGatewayStatusService::class
+        )->recent();
+    }
+
+    public function test_cod_gateway28_db_report_history_is_immutable(): void
+    {
+        $this->gateway28Post(
+            $this->gateway28Payload()
+        )->assertStatus(202);
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_gateway_reports')
+            ->update([
+                'net_minor' => 2000,
+            ]);
+    }
+
+    public function test_cod_gateway28_multiple_credit_reports_require_investigation(): void
+    {
+        $case = $this->settlementReadyCase();
+
+        $bank = $this->bankSettlementClaim(
+            $case,
+            680,
+            'GW_REF_CREDITS_1001'
+        );
+
+        $this->gateway28Post(
+            $this->gateway28Payload(
+                'GW_REF_CREDITS_1001'
+            )
+        )->assertStatus(202);
+
+        $this->gateway28Post(
+            $this->gateway28Payload(
+                'GW_REF_CREDITS_1001'
+            )
+        )->assertStatus(202);
+
+        $this->actor(1200);
+
+        $status = app(
+            CheckoutCodFinancialGatewayStatusService::class
+        )->inspect(
+            'single',
+            $bank['operation_key']
+        );
+
+        $this->assertSame(
+            'multiple_signed_credits_require_investigation',
+            $status['status']
+        );
+
+        $this->assertFalse(
+            $status['cod_paid']
+        );
+    }
+
+    public function test_cod_gateway28_single_dashboard_surfaces_reversal(): void
+    {
+        $case = $this->settlementReadyCase();
+
+        $this->bankSettlementClaim(
+            $case,
+            680,
+            'GW_REF_DASH_SINGLE_1'
+        );
+
+        $this->gateway28Post(
+            $this->gateway28Payload(
+                'GW_REF_DASH_SINGLE_1',
+                'reversal_reported'
+            )
+        )->assertStatus(202);
+
+        $this->actor(1200);
+
+        $state = app(
+            CheckoutCodSettlementBankStatusService::class
+        )->inspect($this->orderKey);
+
+        $this->assertSame(
+            'gateway_reversal_reported_requires_investigation',
+            $state['status']
+        );
+
+        $this->assertTrue(
+            $state['gateway_reversal_reported']
+        );
+
+        $this->assertFalse(
+            $state['funds_received_verified']
+        );
+    }
+
+    public function test_cod_gateway28_batch_dashboard_surfaces_reversal(): void
+    {
+        $batch = $this->bankBatchCreate(
+            680,
+            'GW_REF_DASH_BATCH_1'
+        );
+
+        $this->gateway28Post(
+            $this->gateway28Payload(
+                'GW_REF_DASH_BATCH_1',
+                'reversal_reported'
+            )
+        )->assertStatus(202);
+
+        $this->actor(1200);
+
+        $state = app(
+            CheckoutCodBankBatchStatusService::class
+        )->inspect(
+            $batch['operation_key']
+        );
+
+        $this->assertSame(
+            'gateway_reversal_reported_requires_investigation',
+            $state['status']
+        );
+
+        $this->assertTrue(
+            $state['gateway_reversal_reported']
+        );
+
+        $this->assertFalse(
+            $state['cod_paid']
+        );
+    }
+
+    private function bankEvidence29Payload(
+        string $reference = 'BANKREF_EVIDENCE_29',
+        string $kind = 'credit',
+        int $amount = 680,
+        ?string $eventKey = null,
+        ?string $transactionId = null,
+        ?string $reversedId = null
+    ): array {
+        return [
+            'event_key' => $eventKey ?? (string) Str::uuid(),
+            'event_kind' => $kind,
+            'bank_reference' => $reference,
+            'bank_transaction_id' => $transactionId ?? ('BANKTX_' . Str::random(20)),
+            'reverses_transaction_id' => $reversedId,
+            'amount_minor' => $amount,
+            'currency_code' => 'UAH',
+            'account_alias' => 'cod_primary_ua',
+            'occurred_at_epoch' => now()->timestamp,
+        ];
+    }
+
+    private function bankEvidence29Post(
+        array $payload,
+        ?string $nonce = null,
+        ?int $timestamp = null,
+        ?string $signedBody = null,
+        ?string $sentBody = null,
+        string $keyId = 'active',
+        string $providerId = 'provider_primary'
+    ): \Illuminate\Testing\TestResponse {
+        $pair = sodium_crypto_sign_seed_keypair(str_repeat("\x09", 32));
+        $secret = sodium_crypto_sign_secretkey($pair);
+        $public = sodium_crypto_sign_publickey($pair);
+        $oldPair = sodium_crypto_sign_seed_keypair(str_repeat("\x0a", 32));
+        $oldSecret = sodium_crypto_sign_secretkey($oldPair);
+        $oldPublic = sodium_crypto_sign_publickey($oldPair);
+
+        config()->set('services.cod_bank_evidence', [
+            'enabled' => true,
+            'providers' => [
+                'provider_primary' => [
+                    'enabled' => true,
+                    'account_alias' => 'cod_primary_ua',
+                    'public_keys' => [
+                        'active' => base64_encode($public),
+                        'previous' => base64_encode($oldPublic),
+                    ],
+                ],
+            ],
+        ]);
+
+        $body = json_encode($payload, JSON_THROW_ON_ERROR);
+        $signedBody ??= $body;
+        $sentBody ??= $body;
+        $nonce ??= (string) Str::uuid();
+        $timestamp ??= now()->timestamp;
+        $stamp = (string) $timestamp;
+        $message = CheckoutCodBankEvidenceVerifier::signedMessage(
+            $providerId, $keyId, $stamp, $nonce, $signedBody
+        );
+        $sig = base64_encode(sodium_crypto_sign_detached(
+            $message,
+            $keyId === 'previous' ? $oldSecret : $secret
+        ));
+
+        return $this->call(
+            'POST', '/api/v1/cod/bank-evidence/ingest', [], [], [],
+            [
+                'CONTENT_TYPE' => 'application/json',
+                'HTTP_ACCEPT' => 'application/json',
+                'HTTP_X_COD_BANK_PROVIDER' => $providerId,
+                'HTTP_X_COD_BANK_KEY' => $keyId,
+                'HTTP_X_COD_BANK_TIMESTAMP' => $stamp,
+                'HTTP_X_COD_BANK_NONCE' => $nonce,
+                'HTTP_X_COD_BANK_SIGNATURE' => $sig,
+            ],
+            $sentBody
+        );
+    }
+
+    public function test_cod_bank_evidence29_disabled_source_rejected(): void
+    {
+        config()->set('services.cod_bank_evidence.enabled', false);
+        $this->postJson('/api/v1/cod/bank-evidence/ingest',
+            $this->bankEvidence29Payload())->assertUnauthorized();
+        $this->assertDatabaseCount('checkout_cod_bank_evidence_events', 0);
+    }
+
+    public function test_cod_bank_evidence29_valid_signed_event_is_not_payment(): void
+    {
+        $this->bankEvidence29Post($this->bankEvidence29Payload())
+            ->assertStatus(202)
+            ->assertJsonPath('provider_signature_verified', true)
+            ->assertJsonPath('funds_received_verified', false)
+            ->assertJsonPath('cod_paid', false);
+        $this->assertDatabaseCount('checkout_cod_bank_evidence_events', 1);
+        $this->assertSame('pending', DB::table('orders')
+            ->where('order_key', $this->orderKey)->value('payment_status'));
+    }
+
+    public function test_cod_bank_evidence29_correlates_single_claim(): void
+    {
+        $case = $this->settlementReadyCase();
+        $bank = $this->bankSettlementClaim($case, 680, 'BANKREF_PROOF_SINGLE_29');
+        $this->bankEvidence29Post($this->bankEvidence29Payload('BANKREF_PROOF_SINGLE_29'))
+            ->assertStatus(202);
+        $this->actor(1200);
+        $state = app(CheckoutCodBankEvidenceStatusService::class)
+            ->inspect('single', $bank['operation_key']);
+        $this->assertSame('signature_correlated_payment_unverified', $state['status']);
+        $this->assertSame(1, $state['credit_events_count']);
+        $this->assertFalse($state['cod_paid']);
+    }
+
+    public function test_cod_bank_evidence29_correlates_batch_claim(): void
+    {
+        $batch = $this->bankBatchCreate(1360, 'BANKREF_PROOF_BATCH_29');
+        $this->bankEvidence29Post($this->bankEvidence29Payload('BANKREF_PROOF_BATCH_29', 'credit', 1360))
+            ->assertStatus(202);
+        $this->actor(1200);
+        $this->assertSame('signature_correlated_payment_unverified',
+            app(CheckoutCodBankEvidenceStatusService::class)
+                ->inspect('batch', $batch['operation_key'])['status']);
+    }
+
+    public function test_cod_bank_evidence29_signed_message_tamper_rejected(): void
+    {
+        $data = $this->bankEvidence29Payload();
+        $signed = json_encode($data, JSON_THROW_ON_ERROR);
+        $changed = json_encode(array_merge($data, ['amount_minor' => 681]), JSON_THROW_ON_ERROR);
+        $this->bankEvidence29Post($data, signedBody: $signed, sentBody: $changed)
+            ->assertUnauthorized();
+        $this->assertDatabaseCount('checkout_cod_bank_evidence_events', 0);
+    }
+
+    public function test_cod_bank_evidence29_expired_envelope_rejected(): void
+    {
+        $this->bankEvidence29Post($this->bankEvidence29Payload(),
+            timestamp: now()->timestamp - 301)->assertUnauthorized();
+    }
+
+    public function test_cod_bank_evidence29_wrong_provider_rejected(): void
+    {
+        $this->bankEvidence29Post($this->bankEvidence29Payload(),
+            providerId: 'unknown_provider')->assertUnauthorized();
+    }
+
+    public function test_cod_bank_evidence29_unknown_key_rejected(): void
+    {
+        $this->bankEvidence29Post($this->bankEvidence29Payload(),
+            keyId: 'unknown')->assertUnauthorized();
+    }
+
+    public function test_cod_bank_evidence29_replayed_nonce_rejected(): void
+    {
+        $payload = $this->bankEvidence29Payload();
+        $nonce = (string) Str::uuid();
+        $this->bankEvidence29Post($payload, nonce: $nonce)->assertStatus(202);
+        $this->bankEvidence29Post($payload, nonce: $nonce)->assertStatus(409);
+        $this->assertDatabaseCount('checkout_cod_bank_evidence_nonces', 1);
+    }
+
+    public function test_cod_bank_evidence29_same_event_new_nonce_idempotent(): void
+    {
+        $payload = $this->bankEvidence29Payload();
+        $this->bankEvidence29Post($payload)->assertJsonPath('duplicate_event', false);
+        $this->bankEvidence29Post($payload)->assertJsonPath('duplicate_event', true);
+        $this->assertDatabaseCount('checkout_cod_bank_evidence_events', 1);
+        $this->assertDatabaseCount('checkout_cod_bank_evidence_nonces', 2);
+    }
+
+    public function test_cod_bank_evidence29_conflicting_event_uuid_rejected(): void
+    {
+        $payload = $this->bankEvidence29Payload();
+        $this->bankEvidence29Post($payload)->assertStatus(202);
+        $payload['amount_minor'] = 681;
+        $this->bankEvidence29Post($payload)->assertStatus(409);
+        $this->assertDatabaseCount('checkout_cod_bank_evidence_events', 1);
+    }
+
+    public function test_cod_bank_evidence29_same_bank_transaction_new_uuid_rejected(): void
+    {
+        $payload = $this->bankEvidence29Payload();
+        $this->bankEvidence29Post($payload)->assertStatus(202);
+        $payload['event_key'] = (string) Str::uuid();
+        $this->bankEvidence29Post($payload)->assertStatus(409);
+        $this->assertDatabaseCount('checkout_cod_bank_evidence_events', 1);
+    }
+
+    public function test_cod_bank_evidence29_key_rotation_previous_supported(): void
+    {
+        $this->bankEvidence29Post($this->bankEvidence29Payload(),
+            keyId: 'previous')->assertStatus(202);
+        $this->assertDatabaseHas('checkout_cod_bank_evidence_events',
+            ['key_id' => 'previous']);
+    }
+
+    public function test_cod_bank_evidence29_amount_discrepancy_blocks_match(): void
+    {
+        [$case, $claim] = $this->bankSettlementReviewedClaim();
+        $bank = $this->bankSettlementClaim($case, 680, 'BANKREF_DIFF_SIGNED_29');
+        $this->bankEvidence29Post($this->bankEvidence29Payload('BANKREF_DIFF_SIGNED_29', 'credit', 500))
+            ->assertStatus(202);
+        $this->actor(1200);
+        $status = app(CheckoutCodBankEvidenceStatusService::class)
+            ->inspect('single', $bank['operation_key']);
+        $this->assertSame('signed_amount_discrepancy', $status['status']);
+        $this->expectException(QueryException::class);
+        $this->bankSettlementMatch($claim, $bank);
+    }
+
+    public function test_cod_bank_evidence29_signed_reversal_blocks_single_matching(): void
+    {
+        [$case, $claim] = $this->bankSettlementReviewedClaim();
+        $bank = $this->bankSettlementClaim($case, 680, 'BANKREF_REV_SINGLE_29');
+        $payload = $this->bankEvidence29Payload('BANKREF_REV_SINGLE_29', 'reversal', 680,
+            reversedId: 'BANKTX_ORIGINAL_29');
+        $this->bankEvidence29Post($payload)->assertStatus(202);
+        $this->expectException(QueryException::class);
+        $this->bankSettlementMatch($claim, $bank);
+    }
+
+    public function test_cod_bank_evidence29_signed_reversal_blocks_batch_allocation(): void
+    {
+        [, $claim] = $this->bankBatchSource();
+        $batch = $this->bankBatchCreate(680, 'BANKREF_REV_BATCH_29');
+        $payload = $this->bankEvidence29Payload('BANKREF_REV_BATCH_29', 'reversal', 680,
+            reversedId: 'BANKTX_ORIGINAL_BATCH_29');
+        $this->bankEvidence29Post($payload)->assertStatus(202);
+        $this->expectException(QueryException::class);
+        $this->bankBatchAllocate($batch, $claim);
+    }
+
+    public function test_cod_bank_evidence29_multiple_credits_block_match(): void
+    {
+        [$case, $claim] = $this->bankSettlementReviewedClaim();
+        $bank = $this->bankSettlementClaim($case, 680, 'BANKREF_MULTI_CREDIT_29');
+        $this->bankEvidence29Post($this->bankEvidence29Payload('BANKREF_MULTI_CREDIT_29'))
+            ->assertStatus(202);
+        $this->bankEvidence29Post($this->bankEvidence29Payload('BANKREF_MULTI_CREDIT_29'))
+            ->assertStatus(202);
+        $this->expectException(QueryException::class);
+        $this->bankSettlementMatch($claim, $bank);
+    }
+
+    public function test_cod_bank_evidence29_unmatched_then_late_bank_claim_correlates(): void
+    {
+        $this->bankEvidence29Post($this->bankEvidence29Payload('BANKREF_LATE_29'))
+            ->assertStatus(202);
+        $case = $this->settlementReadyCase();
+        $bank = $this->bankSettlementClaim($case, 680, 'BANKREF_LATE_29');
+        $this->actor(1200);
+        $this->assertSame(1, app(CheckoutCodBankEvidenceStatusService::class)
+            ->inspect('single', $bank['operation_key'])['events_count']);
+    }
+
+    public function test_cod_bank_evidence29_queue_redacts_transaction_references(): void
+    {
+        $this->bankEvidence29Post($this->bankEvidence29Payload('BANKREF_PRIVATE_29',
+            transactionId: 'BANKTX_PRIVATE_29'))->assertStatus(202);
+        $this->actor(1200);
+        $queue = app(CheckoutCodBankEvidenceStatusService::class)->recent();
+        $json = json_encode($queue, JSON_THROW_ON_ERROR);
+        $this->assertCount(1, $queue['items']);
+        $this->assertStringNotContainsString('BANKREF_PRIVATE_29', $json);
+        $this->assertStringNotContainsString('BANKTX_PRIVATE_29', $json);
+        $this->assertFalse($queue['automatic_settlement_allowed']);
+    }
+
+    public function test_cod_bank_evidence29_read_permission_enforced(): void
+    {
+        $this->actor(999);
+        $this->expectException(AuthorizationException::class);
+        app(CheckoutCodBankEvidenceStatusService::class)->recent();
+    }
+
+    public function test_cod_bank_evidence29_history_immutable(): void
+    {
+        $this->bankEvidence29Post($this->bankEvidence29Payload())->assertStatus(202);
+        $this->expectException(QueryException::class);
+        DB::table('checkout_cod_bank_evidence_events')->update(['amount_minor' => 1]);
+    }
+
+    public function test_cod_bank_evidence29_order_remains_unpaid_after_valid_credit(): void
+    {
+        $case = $this->settlementReadyCase();
+        $this->bankSettlementClaim($case, 680, 'BANKREF_PAY_SAFE_29');
+        $this->bankEvidence29Post($this->bankEvidence29Payload('BANKREF_PAY_SAFE_29'))
+            ->assertStatus(202)->assertJsonPath('refund_executed', false);
+        $this->assertSame('pending', DB::table('orders')
+            ->where('order_key', $this->orderKey)->value('payment_status'));
+    }
+
+    public function test_cod_bank_evidence29_reversal_surfaces_in_single_dashboard(): void
+    {
+        $case = $this->settlementReadyCase();
+        $this->bankSettlementClaim($case, 680, 'BANKREF_DASH_SINGLE_29');
+        $this->bankEvidence29Post($this->bankEvidence29Payload('BANKREF_DASH_SINGLE_29',
+            'reversal', 680, reversedId: 'BANKTX_DASH_OLD_29'))->assertStatus(202);
+        $this->actor(1200);
+        $status = app(CheckoutCodSettlementBankStatusService::class)->inspect($this->orderKey);
+        $this->assertSame('bank_evidence_requires_investigation', $status['status']);
+        $this->assertTrue($status['bank_evidence_alert']);
+    }
+
+    public function test_cod_bank_evidence29_reversal_surfaces_in_batch_dashboard(): void
+    {
+        $batch = $this->bankBatchCreate(680, 'BANKREF_DASH_BATCH_29');
+        $this->bankEvidence29Post($this->bankEvidence29Payload('BANKREF_DASH_BATCH_29',
+            'reversal', 680, reversedId: 'BANKTX_DASH_B_29'))->assertStatus(202);
+        $this->actor(1200);
+        $status = app(CheckoutCodBankBatchStatusService::class)
+            ->inspect($batch['operation_key']);
+        $this->assertSame('bank_evidence_requires_investigation', $status['status']);
+        $this->assertTrue($status['bank_evidence_alert']);
+    }
+
+    private function privatStatement30Import(
+        string $reference,
+        string $amount
+    ): void {
+        $this->actor(3001);
+
+        Gate::define(
+            CheckoutCodPrivatStatementImportService::IMPORT_ABILITY,
+            static fn ($u): bool =>
+                (int) $u->getAuthIdentifier() === 3001
+        );
+
+        $iban = 'UA111111111111111111111111111';
+
+        config()->set(
+            'services.privatbank_autoclient',
+            [
+                'enabled' => true,
+                'token' => 'privat-statement-test-token-0001',
+                'account_iban' => $iban,
+                'account_alias' => 'pb_primary_ua',
+            ]
+        );
+
+
+        $this->privatStatement30Fixture = [
+            'status' => 'SUCCESS',
+            'type' => 'transactions',
+            'exist_next_page' => false,
+            'next_page_id' => null,
+            'transactions' => [
+                [
+                    'AUT_MY_ACC' => $iban,
+                    'FL_REAL' => 'r',
+                    'PR_PR' => 'r',
+                    'CCY' => 'UAH',
+                    'TRANTYPE' => 'C',
+                    'REF' => $reference,
+                    'REFN' => '1',
+                    'SUM' => $amount,
+                    'DAT_OD' => now('Europe/Kyiv')
+                        ->subDay()
+                        ->format('d.m.Y'),
+                ],
+            ],
+        ];
+
+
+        $day = now('Europe/Kyiv')->subDay()->toDateString();
+
+        app(CheckoutCodPrivatStatementImportService::class)
+            ->import(
+                (string) Str::uuid(),
+                $day,
+                $day
+            );
+    }
+
+    public function test_privat_statement30_conflicting_amount_blocks_cod_single_match(): void
+    {
+        [$case, $claim] = $this->bankSettlementReviewedClaim();
+
+        $bank = $this->bankSettlementClaim(
+            $case,
+            680,
+            'BANKREF_COD_SYNC_30'
+        );
+
+        // Statement reports 5.00 UAH, claim expects 6.80 UAH.
+        $this->privatStatement30Import(
+            'BANKREF_COD_SYNC_30',
+            '5.00'
+        );
+
+        $this->actor(1200);
+
+        $state = app(
+            CheckoutCodSettlementBankStatusService::class
+        )->inspect($this->orderKey);
+
+        $this->assertTrue(
+            $state['privatbank_statement_alert']
+        );
+
+        $this->assertSame(
+            'privatbank_statement_requires_investigation',
+            $state['status']
+        );
+
+        $this->expectException(QueryException::class);
+
+        $this->bankSettlementMatch(
+            $claim,
+            $bank
+        );
+    }
+
+    public function test_privat_statement30_conflicting_amount_blocks_cod_batch_allocation(): void
+    {
+        [, $claim] = $this->bankBatchSource();
+
+        $batch = $this->bankBatchCreate(
+            680,
+            'BANKREF_COD_BATCH_30'
+        );
+
+        $this->privatStatement30Import(
+            'BANKREF_COD_BATCH_30',
+            '5.00'
+        );
+
+        $this->actor(1200);
+
+        $state = app(
+            CheckoutCodBankBatchStatusService::class
+        )->inspect(
+            $batch['operation_key']
+        );
+
+        $this->assertTrue(
+            $state['privatbank_statement_alert']
+        );
+
+        $this->assertSame(
+            'privatbank_statement_requires_investigation',
+            $state['status']
+        );
+
+        $this->expectException(QueryException::class);
+
+        $this->bankBatchAllocate(
+            $batch,
+            $claim
         );
     }
 

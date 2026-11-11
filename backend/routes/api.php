@@ -11,6 +11,11 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 
+use App\Http\Controllers\Api\CheckoutCodBankEvidenceController;
+
+use App\Http\Controllers\Api\CheckoutCodFinancialGatewayController;
+
+
 Route::prefix('v1/catalog')->group(function () {
     Route::get('/variants', [CatalogController::class, 'index']);
     Route::get('/variants/{sku}', [CatalogController::class, 'show']);
@@ -69,3 +74,15 @@ Route::prefix('v1/delivery/nova-poshta')->group(function () {
     Route::post('/quote', [NovaPoshtaDeliveryPreviewController::class, 'quote'])
         ->middleware('throttle:10,1');
 });
+
+
+Route::post(
+    '/v1/cod/financial-gateway/ingest',
+    CheckoutCodFinancialGatewayController::class
+)->middleware('throttle:30,1');
+
+
+Route::post(
+    '/v1/cod/bank-evidence/ingest',
+    CheckoutCodBankEvidenceController::class
+)->middleware('throttle:30,1');
