@@ -8,6 +8,9 @@ use App\Services\Pricing\CheckoutCodBankEvidenceStatusService;
 
 use App\Services\Pricing\CheckoutCodPrivatStatementImportService;
 
+use App\Services\Pricing\CheckoutCodStatementReconciliationService;
+use App\Services\Pricing\CheckoutCodStatementReconciliationStatusService;
+
 use App\Services\Pricing\CheckoutCodFinancialResolutionService;
 use App\Services\Pricing\CheckoutCodFinancialResolutionStatusService;
 
@@ -6587,6 +6590,305 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
         $this->bankBatchAllocate(
             $batch,
             $claim
+        );
+    }
+
+    // Block 31: reviewed bank statement / NovaPay comparison.
+    private function statement31Gate(): void
+    {
+        Gate::define(
+            CheckoutCodStatementReconciliationService::PROPOSE_ABILITY,
+            static fn ($user): bool => (int) $user->getAuthIdentifier() === 3101
+        );
+        Gate::define(
+            CheckoutCodStatementReconciliationService::REVIEW_ABILITY,
+            static fn ($user): bool => (int) $user->getAuthIdentifier() === 3102
+        );
+    }
+
+    private function statement31EntryId(string $reference): int
+    {
+        $fingerprint = hash_hmac(
+            'sha256',
+            json_encode(['cod-bank-reference-v1', $reference], JSON_THROW_ON_ERROR),
+            (string) config('app.key')
+        );
+        return (int) DB::table('checkout_cod_privat_statement_entries')
+            ->where('reference_hmac', $fingerprint)->orderByDesc('id')->value('id');
+    }
+
+    private function statement31Single(
+        string $reference = 'STMT31_SINGLE_REF',
+        string $bankAmount = '6.80',
+        bool $withMatchReview = true
+    ): array {
+        $this->statement31Gate();
+        [$case, $claim] = $this->bankSettlementReviewedClaim();
+        $bank = $this->bankSettlementClaim($case, 680, $reference);
+        if ($withMatchReview) {
+            $match = $this->bankSettlementMatch($claim, $bank);
+            $this->actor(1903);
+            app(CheckoutCodSettlementBankReviewService::class)->review(
+                $match['operation_key'], (string) Str::uuid(),
+                'retain_external_confirmation', 'bank_and_novapay_unverified'
+            );
+        }
+        $this->privatStatement30Import($reference, $bankAmount);
+        return [$bank, $this->statement31EntryId($reference)];
+    }
+
+    private function statement31Batch(string $reference = 'STMT31_BATCH_REF'): array
+    {
+        $this->statement31Gate();
+        [, $claim] = $this->bankBatchSource();
+        $batch = $this->bankBatchCreate(680, $reference);
+        $this->bankBatchAllocate($batch, $claim);
+        $this->actor(2003);
+        app(CheckoutCodBankBatchReviewService::class)->review(
+            $batch['operation_key'], (string) Str::uuid()
+        );
+        $this->privatStatement30Import($reference, '6.80');
+        return [$batch, $this->statement31EntryId($reference)];
+    }
+
+    private function statement31Propose(string $kind, array $source, int $entryId, ?string $key = null): array
+    {
+        $this->actor(3101);
+        return app(CheckoutCodStatementReconciliationService::class)->propose(
+            $kind, $source['operation_key'], $entryId, $key ?? (string) Str::uuid()
+        );
+    }
+
+    private function statement31Review(array $proposal, string $decision = 'acknowledge_comparison', ?string $key = null): array
+    {
+        $this->actor(3102);
+        return app(CheckoutCodStatementReconciliationService::class)->review(
+            $proposal['operation_key'], $key ?? (string) Str::uuid(), $decision
+        );
+    }
+
+    public function test_statement_reconciliation31_single_balanced_remains_unpaid(): void
+    {
+        [$bank, $entry] = $this->statement31Single();
+        $p = $this->statement31Propose('single', $bank, $entry);
+        $this->assertSame('balanced_unverified', $p['result_code']);
+        $this->assertSame(2000, $p['novapay_gross_minor']);
+        $this->assertSame(1320, $p['novapay_fee_minor']);
+        $this->assertSame(680, $p['novapay_net_minor']);
+        $r = $this->statement31Review($p);
+        $this->assertSame('acknowledge_comparison', $r['decision']);
+        $this->assertFalse($r['funds_received_verified']);
+        $this->actor(1200);
+        $state = app(CheckoutCodStatementReconciliationStatusService::class)
+            ->inspect('single', $bank['operation_key']);
+        $this->assertSame('comparison_reviewed_payment_unverified', $state['status']);
+        $this->assertFalse($state['cod_paid']);
+        $this->assertSame('pending', DB::table('orders')
+            ->where('order_key', $this->orderKey)->value('payment_status'));
+    }
+
+    public function test_statement_reconciliation31_batch_balanced_requires_allocation_review(): void
+    {
+        [$batch, $entry] = $this->statement31Batch();
+        $p = $this->statement31Propose('batch', $batch, $entry);
+        $this->assertSame('balanced_unverified', $p['result_code']);
+        $this->assertSame(1, $p['allocation_count']);
+        $this->statement31Review($p);
+        $this->actor(1200);
+        $this->assertSame('comparison_reviewed_payment_unverified',
+            app(CheckoutCodStatementReconciliationStatusService::class)
+                ->inspect('batch', $batch['operation_key'])['status']);
+    }
+
+    public function test_statement_reconciliation31_bank_shortage_must_be_escalated(): void
+    {
+        [$bank, $entry] = $this->statement31Single(bankAmount: '5.00');
+        $p = $this->statement31Propose('single', $bank, $entry);
+        $this->assertSame('bank_underpayment', $p['result_code']);
+        $this->assertSame(-180, $p['difference_minor']);
+        $this->statement31Review($p, 'escalate_investigation');
+        $this->actor(1200);
+        $this->assertSame('investigation_escalated',
+            app(CheckoutCodStatementReconciliationStatusService::class)
+                ->inspect('single', $bank['operation_key'])['status']);
+    }
+
+    public function test_statement_reconciliation31_bank_overpayment(): void
+    {
+        [$bank, $entry] = $this->statement31Single(bankAmount: '7.00');
+        $p = $this->statement31Propose('single', $bank, $entry);
+        $this->assertSame('bank_overpayment', $p['result_code']);
+        $this->assertSame(20, $p['difference_minor']);
+    }
+
+    public function test_statement_reconciliation31_unreviewed_prior_source_is_not_balanced(): void
+    {
+        [$bank, $entry] = $this->statement31Single(withMatchReview: false);
+        $p = $this->statement31Propose('single', $bank, $entry);
+        $this->assertSame('upstream_unreviewed', $p['result_code']);
+    }
+
+    public function test_statement_reconciliation31_cannot_acknowledge_difference(): void
+    {
+        [$bank, $entry] = $this->statement31Single(bankAmount: '5.00');
+        $p = $this->statement31Propose('single', $bank, $entry);
+        $this->actor(3102);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodStatementReconciliationService::class)->review(
+            $p['operation_key'], (string) Str::uuid(), 'acknowledge_comparison'
+        );
+    }
+
+    public function test_statement_reconciliation31_proposer_cannot_be_source_recorder(): void
+    {
+        [$bank, $entry] = $this->statement31Single();
+        Gate::define(CheckoutCodStatementReconciliationService::PROPOSE_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 1901);
+        $this->actor(1901);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodStatementReconciliationService::class)->propose(
+            'single', $bank['operation_key'], $entry, (string) Str::uuid()
+        );
+    }
+
+    public function test_statement_reconciliation31_reviewer_cannot_be_proposer(): void
+    {
+        [$bank, $entry] = $this->statement31Single();
+        $p = $this->statement31Propose('single', $bank, $entry);
+        Gate::define(CheckoutCodStatementReconciliationService::REVIEW_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 3101);
+        $this->actor(3101);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodStatementReconciliationService::class)->review(
+            $p['operation_key'], (string) Str::uuid(), 'acknowledge_comparison'
+        );
+    }
+
+    public function test_statement_reconciliation31_proposal_replay_is_idempotent(): void
+    {
+        [$bank, $entry] = $this->statement31Single();
+        $key = (string) Str::uuid();
+        $a = $this->statement31Propose('single', $bank, $entry, $key);
+        $b = $this->statement31Propose('single', $bank, $entry, $key);
+        $this->assertSame($a['reconciliation_id'], $b['reconciliation_id']);
+        $this->assertTrue($b['idempotent_replay']);
+        $this->assertDatabaseCount('checkout_cod_statement_reconciliations', 1);
+    }
+
+    public function test_statement_reconciliation31_second_proposal_for_same_source_is_rejected(): void
+    {
+        [$bank, $entry] = $this->statement31Single();
+        $this->statement31Propose('single', $bank, $entry);
+        $this->expectException(DomainException::class);
+        $this->statement31Propose('single', $bank, $entry);
+    }
+
+    public function test_statement_reconciliation31_review_replay_is_idempotent(): void
+    {
+        [$bank, $entry] = $this->statement31Single();
+        $p = $this->statement31Propose('single', $bank, $entry);
+        $key = (string) Str::uuid();
+        $a = $this->statement31Review($p, key: $key);
+        $b = $this->statement31Review($p, key: $key);
+        $this->assertSame($a['review_id'], $b['review_id']);
+        $this->assertTrue($b['idempotent_replay']);
+    }
+
+    public function test_statement_reconciliation31_new_bank_entry_invalidates_old_proposal(): void
+    {
+        [$bank, $entry] = $this->statement31Single();
+        $p = $this->statement31Propose('single', $bank, $entry);
+        $this->privatStatement30Fixture['transactions'][0]['REFN'] = 'SECOND_31';
+        $date = now('Europe/Kyiv')->subDay()->toDateString();
+        $this->actor(3001);
+        app(CheckoutCodPrivatStatementImportService::class)->import(
+            (string) Str::uuid(), $date, $date
+        );
+        $this->actor(1200);
+        $state = app(CheckoutCodStatementReconciliationStatusService::class)
+            ->inspect('single', $bank['operation_key']);
+        $this->assertSame('stale_requires_new_investigation', $state['status']);
+        $this->actor(3102);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodStatementReconciliationService::class)->review(
+            $p['operation_key'], (string) Str::uuid(), 'acknowledge_comparison'
+        );
+    }
+
+    public function test_statement_reconciliation31_financial_hold_blocks_acknowledgment(): void
+    {
+        [$bank, $entry] = $this->statement31Single();
+        $p = $this->statement31Propose('single', $bank, $entry);
+        $this->financialExceptionReport('single', $bank, 'incorrect_amount');
+        $this->actor(3102);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodStatementReconciliationService::class)->review(
+            $p['operation_key'], (string) Str::uuid(), 'acknowledge_comparison'
+        );
+    }
+
+    public function test_statement_reconciliation31_database_history_immutable(): void
+    {
+        [$bank, $entry] = $this->statement31Single();
+        $this->statement31Propose('single', $bank, $entry);
+        $this->expectException(QueryException::class);
+        DB::table('checkout_cod_statement_reconciliations')->update([
+            'claimed_net_minor' => 1,
+        ]);
+    }
+
+    public function test_statement_reconciliation31_queue_redacted_and_read_permission(): void
+    {
+        [$bank, $entry] = $this->statement31Single(reference: 'PRIVATE_STMT31_REF');
+        $this->statement31Propose('single', $bank, $entry);
+        $this->actor(1200);
+        $queue = app(CheckoutCodStatementReconciliationStatusService::class)->recent();
+        $this->assertCount(1, $queue['items']);
+        $json = json_encode($queue, JSON_THROW_ON_ERROR);
+        $this->assertStringNotContainsString('PRIVATE_STMT31_REF', $json);
+        $this->assertStringNotContainsString('UA111111111111111111111111111', $json);
+        $this->assertFalse($queue['automatic_payment_posting_allowed']);
+        $this->actor(999);
+        $this->expectException(AuthorizationException::class);
+        app(CheckoutCodStatementReconciliationStatusService::class)->recent();
+    }
+
+    public function test_statement_reconciliation31_new_evidence_creates_append_only_revision(): void
+    {
+        [$bank, $entry] = $this->statement31Single(reference: 'STMT31_REVISE_REF');
+        $first = $this->statement31Propose('single', $bank, $entry);
+        $this->statement31Review($first);
+
+        $this->privatStatement30Fixture['transactions'][0]['REFN'] = 'NEW_VERSION_31';
+        $day = now('Europe/Kyiv')->subDay()->toDateString();
+        $this->actor(3001);
+        app(CheckoutCodPrivatStatementImportService::class)->import(
+            (string) Str::uuid(), $day, $day
+        );
+
+        $second = $this->statement31Propose('single', $bank, $entry);
+        $this->assertSame('evidence_conflict', $second['result_code']);
+        $this->assertNotSame($first['reconciliation_id'], $second['reconciliation_id']);
+        $this->assertDatabaseCount('checkout_cod_statement_reconciliations', 2);
+        $this->assertDatabaseCount('checkout_cod_statement_reconciliation_reviews', 1);
+
+        $this->actor(1200);
+        $state = app(CheckoutCodStatementReconciliationStatusService::class)
+            ->inspect('single', $bank['operation_key']);
+        $this->assertSame($second['reconciliation_id'], $state['reconciliation_id']);
+        $this->assertSame('discrepancy_awaiting_review', $state['status']);
+    }
+
+    public function test_statement_reconciliation31_import_author_cannot_review(): void
+    {
+        [$bank, $entry] = $this->statement31Single();
+        $p = $this->statement31Propose('single', $bank, $entry);
+        Gate::define(CheckoutCodStatementReconciliationService::REVIEW_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 3001);
+        $this->actor(3001);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodStatementReconciliationService::class)->review(
+            $p['operation_key'], (string) Str::uuid(), 'acknowledge_comparison'
         );
     }
 
