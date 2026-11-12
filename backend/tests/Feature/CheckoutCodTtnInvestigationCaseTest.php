@@ -3,6 +3,13 @@
 namespace Tests\Feature;
 
 
+use App\Services\Pricing\CheckoutCodPrivatRefetchService;
+use App\Services\Pricing\CheckoutCodPrivatRefetchStatusService;
+
+use App\Services\Pricing\CheckoutCodRefetchRiskStatusService;
+
+use App\Services\Pricing\CheckoutCodAdjustmentPlanService;
+
 use App\Services\Pricing\CheckoutCodBankCoverageService;
 use App\Services\Pricing\CheckoutCodBankCoverageStatusService;
 use App\Services\Pricing\CheckoutCodBankBatchReviewService;
@@ -8001,6 +8008,599 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
         app(
             CheckoutCodJournalDraftStatusService::class
         )->recent();
+    }
+
+    // ============================================================
+    // BLOCK 35 — UNEXECUTED COD ADJUSTMENT AND RETURN CLAIMS
+    // ============================================================
+
+    private function adjustment35Gate(): void
+    {
+        Gate::define(CheckoutCodAdjustmentPlanService::PREPARE_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 3501);
+        Gate::define(CheckoutCodAdjustmentPlanService::REVIEW_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 3502);
+    }
+
+    private function adjustment35Source(
+        string $kind = 'single',
+        string $reason = 'customer_return_reported',
+        string $recommendation = 'return_case_followup',
+        int $recommended = 680
+    ): array {
+        [$source, $packet] = $this->journal34Source($kind);
+        $draft = $this->journal34Prepare($packet);
+        $this->journal34Review($draft);
+        $incident = $this->financialExceptionReport($kind, $source, $reason);
+        $this->financialExceptionReview($incident);
+        $this->resolutionTwoSources($incident);
+        $proposal = $this->resolutionProposal($incident, $recommended, $recommendation);
+        $this->resolutionReview($proposal);
+        $this->adjustment35Gate();
+        return [$source, $draft, $incident, $proposal];
+    }
+
+    private function adjustment35Prepare(
+        array $draft,
+        array $proposal,
+        int $requested = 1000,
+        ?string $key = null
+    ): array {
+        $this->actor(3501);
+        return app(CheckoutCodAdjustmentPlanService::class)->prepare(
+            $proposal['operation_key'], $draft['operation_key'],
+            $this->orderKey, $requested, $key ?? (string) Str::uuid()
+        );
+    }
+
+    private function adjustment35Review(
+        array $plan,
+        string $decision = 'retain_unexecuted',
+        ?string $key = null
+    ): array {
+        $this->actor(3502);
+        return app(CheckoutCodAdjustmentPlanService::class)->review(
+            $plan['operation_key'], $key ?? (string) Str::uuid(), $decision
+        );
+    }
+
+    public function test_adjustment_plan35_return_exposure_remains_unexecuted(): void
+    {
+        [, $draft, , $proposal] = $this->adjustment35Source();
+        $plan = $this->adjustment35Prepare($draft, $proposal);
+        $this->assertSame('return_case_followup', $plan['plan_kind']);
+        $this->assertSame(1000, $plan['requested_refund_minor']);
+        $this->assertSame(2000, $plan['original_gross_minor']);
+        $this->assertSame(1320, $plan['original_fee_minor']);
+        $this->assertSame(680, $plan['original_order_net_minor']);
+        $this->assertFalse($plan['customer_refund_executed']);
+        $review = $this->adjustment35Review($plan);
+        $this->assertSame('retain_unexecuted', $review['decision']);
+        $this->actor(1200);
+        $status = app(CheckoutCodAdjustmentPlanService::class)->status($plan['operation_key']);
+        $this->assertSame('adjustment_reviewed_not_executed', $status['status']);
+        $this->assertTrue($status['snapshot_current']);
+        $this->assertSame('pending', DB::table('orders')
+            ->where('order_key', $this->orderKey)->value('payment_status'));
+    }
+
+    public function test_adjustment_plan35_full_return_is_claim_only(): void
+    {
+        [, $draft, , $proposal] = $this->adjustment35Source();
+        $plan = $this->adjustment35Prepare($draft, $proposal, 2000);
+        $this->assertSame(2000, $plan['requested_refund_minor']);
+        $this->assertFalse($plan['financial_ledger_changed']);
+    }
+
+    public function test_adjustment_plan35_amount_correction_signed_difference(): void
+    {
+        [, $draft, , $proposal] = $this->adjustment35Source(
+            reason: 'incorrect_amount', recommendation: 'amount_correction', recommended: 600
+        );
+        $plan = $this->adjustment35Prepare($draft, $proposal, 0);
+        $this->assertSame('amount_correction', $plan['plan_kind']);
+        $this->assertSame(-80, $plan['source_net_difference_minor']);
+        $this->assertSame(0, $plan['requested_refund_minor']);
+        $this->adjustment35Review($plan);
+    }
+
+    public function test_adjustment_plan35_bank_reversal_is_not_customer_refund(): void
+    {
+        [, $draft, , $proposal] = $this->adjustment35Source(
+            reason: 'bank_reversal_reported', recommendation: 'reported_reversal', recommended: 0
+        );
+        $plan = $this->adjustment35Prepare($draft, $proposal, 0);
+        $this->assertSame('reported_reversal', $plan['plan_kind']);
+        $this->assertSame(-680, $plan['source_net_difference_minor']);
+        $this->assertSame(0, $plan['requested_refund_minor']);
+    }
+
+    public function test_adjustment_plan35_batch_return_allocated_to_one_order(): void
+    {
+        [, $draft, , $proposal] = $this->adjustment35Source('batch');
+        $plan = $this->adjustment35Prepare($draft, $proposal, 1000);
+        $this->assertSame('batch', DB::table('checkout_cod_adjustment_plans')
+            ->where('id', $plan['plan_id'])->value('source_kind'));
+        $this->assertSame(680, $plan['original_order_net_minor']);
+        $this->assertSame(1000, $plan['requested_refund_minor']);
+    }
+
+    public function test_adjustment_plan35_zero_refund_rejected(): void
+    {
+        [, $draft, , $proposal] = $this->adjustment35Source();
+        $this->expectException(InvalidArgumentException::class);
+        $this->adjustment35Prepare($draft, $proposal, 0);
+    }
+
+    public function test_adjustment_plan35_over_refund_rejected(): void
+    {
+        [, $draft, , $proposal] = $this->adjustment35Source();
+        $this->expectException(InvalidArgumentException::class);
+        $this->adjustment35Prepare($draft, $proposal, 2001);
+    }
+
+    public function test_adjustment_plan35_planner_independent_of_resolution_author(): void
+    {
+        [, $draft, , $proposal] = $this->adjustment35Source();
+        Gate::define(CheckoutCodAdjustmentPlanService::PREPARE_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 2203);
+        $this->actor(2203);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodAdjustmentPlanService::class)->prepare(
+            $proposal['operation_key'], $draft['operation_key'],
+            $this->orderKey, 1000, (string) Str::uuid()
+        );
+    }
+
+    public function test_adjustment_plan35_reviewer_independent_of_planner(): void
+    {
+        [, $draft, , $proposal] = $this->adjustment35Source();
+        $plan = $this->adjustment35Prepare($draft, $proposal);
+        Gate::define(CheckoutCodAdjustmentPlanService::REVIEW_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 3501);
+        $this->actor(3501);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodAdjustmentPlanService::class)->review(
+            $plan['operation_key'], (string) Str::uuid(), 'retain_unexecuted'
+        );
+    }
+
+    public function test_adjustment_plan35_prepare_idempotent_replay(): void
+    {
+        [, $draft, , $proposal] = $this->adjustment35Source();
+        $key = (string) Str::uuid();
+        $a = $this->adjustment35Prepare($draft, $proposal, 1000, $key);
+        $b = $this->adjustment35Prepare($draft, $proposal, 1000, $key);
+        $this->assertSame($a['plan_id'], $b['plan_id']);
+        $this->assertTrue($b['idempotent_replay']);
+    }
+
+    public function test_adjustment_plan35_duplicate_source_order_rejected(): void
+    {
+        [, $draft, , $proposal] = $this->adjustment35Source();
+        $this->adjustment35Prepare($draft, $proposal);
+        $this->expectException(DomainException::class);
+        $this->adjustment35Prepare($draft, $proposal);
+    }
+
+    public function test_adjustment_plan35_review_idempotent_replay(): void
+    {
+        [, $draft, , $proposal] = $this->adjustment35Source();
+        $plan = $this->adjustment35Prepare($draft, $proposal);
+        $key = (string) Str::uuid();
+        $a = $this->adjustment35Review($plan, key: $key);
+        $b = $this->adjustment35Review($plan, key: $key);
+        $this->assertSame($a['review_id'], $b['review_id']);
+        $this->assertTrue($b['idempotent_replay']);
+    }
+
+    public function test_adjustment_plan35_new_bank_evidence_invalidates_review(): void
+    {
+        [, $draft, , $proposal] = $this->adjustment35Source();
+        $plan = $this->adjustment35Prepare($draft, $proposal);
+        $this->privatStatement30Fixture['transactions'][0]['REFN'] = 'BANK35_NEW';
+        $day = now('Europe/Kyiv')->subDay()->toDateString();
+        $this->actor(3001);
+        app(CheckoutCodPrivatStatementImportService::class)->import(
+            (string) Str::uuid(), $day, $day
+        );
+        $this->actor(1200);
+        $status = app(CheckoutCodAdjustmentPlanService::class)->status($plan['operation_key']);
+        $this->assertSame('adjustment_plan_stale', $status['status']);
+        $this->actor(3502);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodAdjustmentPlanService::class)->review(
+            $plan['operation_key'], (string) Str::uuid(), 'retain_unexecuted'
+        );
+    }
+
+    public function test_adjustment_plan35_database_history_immutable(): void
+    {
+        [, $draft, , $proposal] = $this->adjustment35Source();
+        $this->adjustment35Prepare($draft, $proposal);
+        $this->expectException(QueryException::class);
+        DB::table('checkout_cod_adjustment_plans')->update(['requested_refund_minor' => 1]);
+    }
+
+    public function test_adjustment_plan35_view_requires_permission(): void
+    {
+        [, $draft, , $proposal] = $this->adjustment35Source();
+        $plan = $this->adjustment35Prepare($draft, $proposal);
+        $this->actor(999);
+        $this->expectException(AuthorizationException::class);
+        app(CheckoutCodAdjustmentPlanService::class)->status($plan['operation_key']);
+    }
+
+    // ============================================================
+    // BLOCK 36 — PRIVATBANK FRESH HTTPS REFETCH COMPARISONS
+    // ============================================================
+
+    private function bankRefetch36Gate(): void
+    {
+        Gate::define(CheckoutCodPrivatRefetchService::RECHECK_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 3601);
+    }
+
+    private function bankRefetch36Source(string $kind = 'single'): array
+    {
+        [$source, $entry] = $kind === 'single'
+            ? $this->statement31Single()
+            : $this->statement31Batch();
+        $this->bankRefetch36Gate();
+        return [$source, $entry];
+    }
+
+    private function bankRefetch36Run(
+        string $kind, array $source, ?string $key = null
+    ): array {
+        $this->actor(3601);
+        return app(CheckoutCodPrivatRefetchService::class)->recheck(
+            $kind, $source['operation_key'], $key ?? (string) Str::uuid()
+        );
+    }
+
+    public function test_bank_refetch36_single_exact_remote_credit(): void
+    {
+        [$source] = $this->bankRefetch36Source();
+        $result = $this->bankRefetch36Run('single', $source);
+        $this->assertSame('consistent_unverified', $result['result_code']);
+        $this->assertSame(1, $result['reference_rows']);
+        $this->assertSame(1, $result['exact_rows']);
+        $this->assertFalse($result['bank_native_signature_verified']);
+        $this->assertFalse($result['funds_received_verified']);
+        $this->assertFalse($result['cod_paid']);
+        $this->actor(1200);
+        $status = app(CheckoutCodPrivatRefetchStatusService::class)
+            ->inspect('single', $source['operation_key']);
+        $this->assertTrue($status['fresh_consistent_api_read']);
+        $this->assertFalse($status['payment_posting_allowed']);
+        $this->assertSame('pending', DB::table('orders')
+            ->where('order_key', $this->orderKey)->value('payment_status'));
+    }
+
+    public function test_bank_refetch36_batch_credit_is_separate_source(): void
+    {
+        [$source] = $this->bankRefetch36Source('batch');
+        $result = $this->bankRefetch36Run('batch', $source);
+        $this->assertSame('batch', $result['source_kind']);
+        $this->assertSame('consistent_unverified', $result['result_code']);
+        $this->actor(1200);
+        $s = app(CheckoutCodPrivatRefetchStatusService::class)
+            ->inspect('batch', $source['operation_key']);
+        $this->assertTrue($s['fresh_consistent_api_read']);
+    }
+
+    public function test_bank_refetch36_changed_remote_amount_detected(): void
+    {
+        [$source] = $this->bankRefetch36Source();
+        $this->privatStatement30Fixture['transactions'][0]['SUM'] = '7.00';
+        $r = $this->bankRefetch36Run('single', $source);
+        $this->assertSame('transaction_changed', $r['result_code']);
+        $this->assertSame(0, $r['exact_rows']);
+        $this->actor(1200);
+        $s = app(CheckoutCodPrivatRefetchStatusService::class)
+            ->inspect('single', $source['operation_key']);
+        $this->assertFalse($s['fresh_consistent_api_read']);
+    }
+
+    public function test_bank_refetch36_changed_remote_identity_detected(): void
+    {
+        [$source] = $this->bankRefetch36Source();
+        $this->privatStatement30Fixture['transactions'][0]['REFN'] = 'CHANGED36';
+        $r = $this->bankRefetch36Run('single', $source);
+        $this->assertSame('transaction_changed', $r['result_code']);
+        $this->assertSame(0, $r['identity_rows']);
+    }
+
+    public function test_bank_refetch36_missing_remote_reference_detected(): void
+    {
+        [$source] = $this->bankRefetch36Source();
+        $this->privatStatement30Fixture['transactions'][0]['REF'] = 'ANOTHER_REF36';
+        $r = $this->bankRefetch36Run('single', $source);
+        $this->assertSame('reference_not_found', $r['result_code']);
+        $this->assertSame(0, $r['reference_rows']);
+    }
+
+    public function test_bank_refetch36_ambiguous_reference_detected(): void
+    {
+        [$source] = $this->bankRefetch36Source();
+        $other = $this->privatStatement30Fixture['transactions'][0];
+        $other['REFN'] = 'ANOTHER36';
+        $this->privatStatement30Fixture['transactions'][] = $other;
+        $r = $this->bankRefetch36Run('single', $source);
+        $this->assertSame('ambiguous_reference', $r['result_code']);
+        $this->assertSame(2, $r['reference_rows']);
+        $this->assertFalse($r['cod_paid']);
+    }
+
+    public function test_bank_refetch36_same_uuid_exact_replay(): void
+    {
+        [$source] = $this->bankRefetch36Source();
+        $key = (string) Str::uuid();
+        $first = $this->bankRefetch36Run('single', $source, $key);
+        $second = $this->bankRefetch36Run('single', $source, $key);
+        $this->assertSame($first['refetch_id'], $second['refetch_id']);
+        $this->assertTrue($second['idempotent_replay']);
+        $this->assertDatabaseCount('checkout_cod_privat_refetches', 1);
+    }
+
+    public function test_bank_refetch36_new_uuid_creates_new_audit_snapshot(): void
+    {
+        [$source] = $this->bankRefetch36Source();
+        $a = $this->bankRefetch36Run('single', $source);
+        $b = $this->bankRefetch36Run('single', $source);
+        $this->assertNotSame($a['refetch_id'], $b['refetch_id']);
+        $this->assertDatabaseCount('checkout_cod_privat_refetches', 2);
+    }
+
+    public function test_bank_refetch36_importer_cannot_recheck(): void
+    {
+        [$source] = $this->bankRefetch36Source();
+        Gate::define(CheckoutCodPrivatRefetchService::RECHECK_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 3001);
+        $this->actor(3001);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodPrivatRefetchService::class)->recheck(
+            'single', $source['operation_key'], (string) Str::uuid()
+        );
+    }
+
+    public function test_bank_refetch36_bank_claim_author_cannot_recheck(): void
+    {
+        [$source] = $this->bankRefetch36Source();
+        Gate::define(CheckoutCodPrivatRefetchService::RECHECK_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 1901);
+        $this->actor(1901);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodPrivatRefetchService::class)->recheck(
+            'single', $source['operation_key'], (string) Str::uuid()
+        );
+    }
+
+    public function test_bank_refetch36_operator_permission_required(): void
+    {
+        [$source] = $this->bankRefetch36Source();
+        $this->actor(999);
+        $this->expectException(AuthorizationException::class);
+        app(CheckoutCodPrivatRefetchService::class)->recheck(
+            'single', $source['operation_key'], (string) Str::uuid()
+        );
+    }
+
+    public function test_bank_refetch36_financial_hold_disables_current_status(): void
+    {
+        [$source] = $this->bankRefetch36Source();
+        $this->bankRefetch36Run('single', $source);
+        $this->financialExceptionReport('single', $source, 'incorrect_amount');
+        $this->actor(1200);
+        $state = app(CheckoutCodPrivatRefetchStatusService::class)
+            ->inspect('single', $source['operation_key']);
+        $this->assertSame('financial_investigation_hold', $state['status']);
+        $this->assertFalse($state['fresh_consistent_api_read']);
+    }
+
+    public function test_bank_refetch36_local_new_transaction_invalidates_old_read(): void
+    {
+        [$source] = $this->bankRefetch36Source();
+        $this->bankRefetch36Run('single', $source);
+        $this->privatStatement30Fixture['transactions'][0]['REFN'] = 'LATER36';
+        $day = now('Europe/Kyiv')->subDay()->toDateString();
+        $this->actor(3001);
+        app(CheckoutCodPrivatStatementImportService::class)
+            ->import((string) Str::uuid(), $day, $day);
+        $this->actor(1200);
+        $status = app(CheckoutCodPrivatRefetchStatusService::class)
+            ->inspect('single', $source['operation_key']);
+        $this->assertSame('local_statement_changed', $status['status']);
+        $this->assertFalse($status['fresh_consistent_api_read']);
+    }
+
+    public function test_bank_refetch36_connector_failure_records_nothing(): void
+    {
+        [$source] = $this->bankRefetch36Source();
+        $this->privatStatement30Fixture['status'] = 'FAILED';
+        $this->expectException(DomainException::class);
+        try {
+            $this->bankRefetch36Run('single', $source);
+        } finally {
+            $this->assertDatabaseCount('checkout_cod_privat_refetches', 0);
+        }
+    }
+
+    public function test_bank_refetch36_audit_is_immutable(): void
+    {
+        [$source] = $this->bankRefetch36Source();
+        $this->bankRefetch36Run('single', $source);
+        $this->expectException(QueryException::class);
+        DB::table('checkout_cod_privat_refetches')->update(['result_code' => 'reference_not_found']);
+    }
+
+    public function test_bank_refetch36_queue_is_redacted_and_permissioned(): void
+    {
+        [$source] = $this->bankRefetch36Source();
+        $this->bankRefetch36Run('single', $source);
+        $this->actor(1200);
+        $queue = app(CheckoutCodPrivatRefetchStatusService::class)->recent();
+        $this->assertCount(1, $queue['items']);
+        $json = json_encode($queue, JSON_THROW_ON_ERROR);
+        $this->assertStringNotContainsString('STMT31_SINGLE_REF', $json);
+        $this->assertStringNotContainsString('UA111111111111111111111111111', $json);
+        $this->assertFalse($queue['automatic_payment_posting_allowed']);
+        $this->actor(999);
+        $this->expectException(AuthorizationException::class);
+        app(CheckoutCodPrivatRefetchStatusService::class)->recent();
+    }
+
+    // ============================================================
+    // BLOCK 37 — REFRESHED BANK API ANOMALIES STOP POSITIVE COD APPROVALS
+    // ============================================================
+
+    private function refetchRisk37Negative(string $kind, array $source): array
+    {
+        $this->bankRefetch36Gate();
+        $this->privatStatement30Fixture['transactions'][0]['SUM'] = '7.00';
+        return $this->bankRefetch36Run($kind, $source);
+    }
+
+    public function test_refetch_risk37_without_recheck_has_no_invented_hold(): void
+    {
+        [$source] = $this->statement31Single();
+        $this->actor(1200);
+        $r = app(CheckoutCodRefetchRiskStatusService::class)
+            ->inspect('single', $source['operation_key']);
+        $this->assertSame('no_api_recheck_yet', $r['status']);
+        $this->assertFalse($r['blocks_financial_approval']);
+        $this->assertFalse($r['funds_received_verified']);
+        $this->assertArrayNotHasKey('snapshot_items', $r);
+    }
+
+    public function test_refetch_risk37_clean_recheck_does_not_stale_balanced_comparison(): void
+    {
+        [$source] = $this->posting32Source();
+        $this->bankRefetch36Gate();
+        $this->bankRefetch36Run('single', $source);
+        $this->actor(1200);
+        $state = app(CheckoutCodStatementReconciliationStatusService::class)
+            ->inspect('single', $source['operation_key']);
+        $this->assertSame('comparison_reviewed_payment_unverified', $state['status']);
+        $this->assertTrue($state['snapshot_current']);
+        $this->assertFalse($state['cod_paid']);
+    }
+
+    public function test_refetch_risk37_negative_recheck_stales_prior_comparison(): void
+    {
+        [$source] = $this->posting32Source();
+        $this->refetchRisk37Negative('single', $source);
+        $this->actor(1200);
+        $state = app(CheckoutCodStatementReconciliationStatusService::class)
+            ->inspect('single', $source['operation_key']);
+        $this->assertSame('stale_requires_new_investigation', $state['status']);
+        $this->assertSame('evidence_conflict', $state['current_result_code']);
+        $risk = app(CheckoutCodRefetchRiskStatusService::class)
+            ->inspect('single', $source['operation_key']);
+        $this->assertTrue($risk['blocks_financial_approval']);
+        $this->assertSame(1, $risk['negative_observations_count']);
+    }
+
+    public function test_refetch_risk37_later_consistent_read_does_not_erase_negative_history(): void
+    {
+        [$source] = $this->bankRefetch36Source();
+        $this->refetchRisk37Negative('single', $source);
+        $this->privatStatement30Fixture['transactions'][0]['SUM'] = '6.80';
+        $this->bankRefetch36Run('single', $source);
+        $this->actor(1200);
+        $risk = app(CheckoutCodRefetchRiskStatusService::class)
+            ->inspect('single', $source['operation_key']);
+        $this->assertSame('bank_refetch_anomaly_unresolved', $risk['status']);
+        $this->assertSame('consistent_unverified', $risk['latest_result_code']);
+        $this->assertTrue($risk['blocks_financial_approval']);
+    }
+
+    public function test_refetch_risk37_database_blocks_approval_of_posting_preflight(): void
+    {
+        [$source, $proposal] = $this->posting32Source();
+        $preflight = $this->posting32Prepare($proposal);
+        $this->refetchRisk37Negative('single', $source);
+        $this->expectException(QueryException::class);
+        DB::table('checkout_cod_posting_preflight_reviews')->insert([
+            'review_key' => (string) Str::uuid(),
+            'preflight_id' => $preflight['preflight_id'],
+            'decision' => 'retain_unverified',
+            'reason_code' => 'external_payment_evidence_required',
+            'reviewed_by' => 3202,
+            'request_hmac' => str_repeat('a', 64),
+            'created_at' => now(),
+        ]);
+    }
+
+    public function test_refetch_risk37_database_blocks_coverage_review(): void
+    {
+        [$source] = $this->coverage33Source();
+        $packet = $this->coverage33Compile('single', $source);
+        $this->refetchRisk37Negative('single', $source);
+        $this->expectException(QueryException::class);
+        DB::table('checkout_cod_bank_coverage_reviews')->insert([
+            'review_key' => (string) Str::uuid(),
+            'packet_id' => $packet['packet_id'],
+            'decision' => 'retain_unverified',
+            'reason_code' => 'external_bank_confirmation_required',
+            'reviewed_by' => 3302,
+            'request_hmac' => str_repeat('b', 64),
+            'created_at' => now(),
+        ]);
+    }
+
+    public function test_refetch_risk37_database_blocks_journal_draft_review(): void
+    {
+        [$source, $packet] = $this->journal34Source();
+        $draft = $this->journal34Prepare($packet);
+        $this->refetchRisk37Negative('single', $source);
+        $this->expectException(QueryException::class);
+        DB::table('checkout_cod_journal_draft_reviews')->insert([
+            'review_key' => (string) Str::uuid(),
+            'draft_id' => $draft['draft_id'],
+            'decision' => 'retain_unposted',
+            'reason_code' => 'authenticated_payment_evidence_required',
+            'reviewed_by' => 3402,
+            'request_hmac' => str_repeat('c', 64),
+            'created_at' => now(),
+        ]);
+    }
+
+    public function test_refetch_risk37_database_allows_escalation_after_negative_recheck(): void
+    {
+        [$source, $entry] = $this->statement31Single();
+        $proposal = $this->statement31Propose('single', $source, $entry);
+        $this->refetchRisk37Negative('single', $source);
+        $review = $this->statement31Review($proposal, 'escalate_investigation');
+        $this->assertSame('escalate_investigation', $review['decision']);
+        $this->assertFalse($review['cod_paid']);
+    }
+
+    public function test_refetch_risk37_database_blocks_direct_acknowledgment(): void
+    {
+        [$source, $entry] = $this->statement31Single();
+        $proposal = $this->statement31Propose('single', $source, $entry);
+        $this->refetchRisk37Negative('single', $source);
+        $this->expectException(QueryException::class);
+        DB::table('checkout_cod_statement_reconciliation_reviews')->insert([
+            'review_key' => (string) Str::uuid(),
+            'reconciliation_id' => $proposal['reconciliation_id'],
+            'decision' => 'acknowledge_comparison',
+            'reason_code' => 'external_payment_verification_required',
+            'reviewed_by' => 3102,
+            'request_hmac' => str_repeat('d', 64),
+            'created_at' => now(),
+        ]);
+    }
+
+    public function test_refetch_risk37_reader_requires_permission(): void
+    {
+        [$source] = $this->statement31Single();
+        $this->actor(999);
+        $this->expectException(AuthorizationException::class);
+        app(CheckoutCodRefetchRiskStatusService::class)
+            ->inspect('single', $source['operation_key']);
     }
 
 }

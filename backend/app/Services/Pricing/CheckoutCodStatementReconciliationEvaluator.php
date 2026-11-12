@@ -9,8 +9,10 @@ use InvalidArgumentException;
 /** Re-evaluates the live bank/claim/hold picture on every decision. */
 final class CheckoutCodStatementReconciliationEvaluator
 {
+
     public function __construct(
-        private readonly CheckoutCodStatementReconciliationPolicy $policy
+        private readonly CheckoutCodStatementReconciliationPolicy $policy,
+        private readonly CheckoutCodRefetchRiskService $refetchRisk
     ) {
     }
 
@@ -166,6 +168,13 @@ final class CheckoutCodStatementReconciliationEvaluator
             || $signedCredits->contains(fn (object $r): bool =>
                 (int) $r->amount_minor !== (int) $source->claimed_net_minor);
 
+        $refetchRisk = $this->refetchRisk->inspect(
+            $kind,
+            (int) $source->id
+        );
+
+        $risk = $risk || $refetchRisk['blocks_financial_approval'];
+
         $result = $this->policy->compare(
             (int) $source->claimed_net_minor, (int) $entry->amount_minor,
             $gross, $fee, $novaNet, $count, $reviewed, $risk
@@ -194,8 +203,17 @@ final class CheckoutCodStatementReconciliationEvaluator
                 $signed->map(static fn (object $r): array => [
                     (int) $r->id, (string) $r->event_kind, (int) $r->amount_minor,
                 ])->all(),
+
+                ...($refetchRisk['blocks_financial_approval']
+                    ? [[
+                        'cod-refetch-risk-v1',
+                        $refetchRisk['negative_snapshot_items'],
+                    ]]
+                    : []),
+
             ]),
         ]);
+
     }
 
     private function hasHold(string $kind, int $id): bool
