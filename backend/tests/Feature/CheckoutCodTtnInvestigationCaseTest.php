@@ -6,6 +6,10 @@ namespace Tests\Feature;
 use App\Services\Pricing\CheckoutCodPrivatRefetchService;
 use App\Services\Pricing\CheckoutCodPrivatRefetchStatusService;
 
+use App\Services\Pricing\CheckoutCodBankReceiptPostingService;
+use App\Services\Pricing\CheckoutCodBankReceiptPostingEvaluator;
+use App\Services\Pricing\CheckoutCodBankReceiptPostingStatusService;
+
 use App\Services\Pricing\CheckoutCodRefetchRiskStatusService;
 
 use App\Services\Pricing\CheckoutCodAdjustmentPlanService;
@@ -8601,6 +8605,277 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
         $this->expectException(AuthorizationException::class);
         app(CheckoutCodRefetchRiskStatusService::class)
             ->inspect('single', $source['operation_key']);
+    }
+
+    // ============================================================
+    // BLOCK 38 — AUTHENTICATED BANK CREDIT -> INTERNAL LEDGER
+    // ============================================================
+
+    private function bankReceipt38Gate(): void
+    {
+        Gate::define(CheckoutCodBankReceiptPostingService::POST_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 3801);
+    }
+
+    private function bankReceipt38Source(string $kind = 'single', bool $multi = false): array
+    {
+        if ($multi) {
+            [$source, $packet] = $this->journal34MultiOrderSource();
+        } else {
+            [$source, $packet] = $this->journal34Source($kind);
+        }
+        $draft = $this->journal34Prepare($packet);
+        $this->journal34Review($draft);
+        $this->bankRefetch36Gate();
+        $refetch = $this->bankRefetch36Run($kind, $source);
+        $this->bankReceipt38Gate();
+        return [$source, $draft, $refetch];
+    }
+
+    private function bankReceipt38Post(array $draft, array $refetch, ?string $key = null): array
+    {
+        $this->actor(3801);
+        return app(CheckoutCodBankReceiptPostingService::class)->post(
+            $draft['operation_key'], $refetch['operation_key'],
+            $key ?? (string) Str::uuid()
+        );
+    }
+
+    public function test_bank_receipt38_single_credit_posts_two_ledger_lines_without_paid(): void
+    {
+        [, $draft, $refetch] = $this->bankReceipt38Source();
+        $post = $this->bankReceipt38Post($draft, $refetch);
+        $this->assertSame(680, $post['amount_minor']);
+        $this->assertSame(2, $post['ledger_lines_count']);
+        $this->assertTrue($post['bank_credit_booked_in_internal_ledger']);
+        $this->assertFalse($post['cod_paid']);
+        $lines = DB::table('checkout_cod_bank_receipt_ledger_lines')
+            ->where('posting_id', $post['posting_id'])->orderBy('side')->get();
+        $this->assertCount(2, $lines);
+        $this->assertSame(1360, (int) $lines->sum('amount_minor'));
+        $this->assertSame('pending', DB::table('orders')
+            ->where('order_key', $this->orderKey)->value('payment_status'));
+        $this->actor(1200);
+        $status = app(CheckoutCodBankReceiptPostingStatusService::class)
+            ->inspect($draft['operation_key']);
+        $this->assertSame('bank_credit_posted', $status['status']);
+    }
+
+    public function test_bank_receipt38_batch_credit_posted_once(): void
+    {
+        [, $draft, $refetch] = $this->bankReceipt38Source('batch');
+        $post = $this->bankReceipt38Post($draft, $refetch);
+        $this->assertSame('batch', $post['source_kind']);
+        $this->assertSame(680, $post['amount_minor']);
+        $this->assertDatabaseCount('checkout_cod_bank_receipt_postings', 1);
+    }
+
+    public function test_bank_receipt38_multi_order_batch_one_bank_entry(): void
+    {
+        [, $draft, $refetch] = $this->bankReceipt38Source('batch', true);
+        $post = $this->bankReceipt38Post($draft, $refetch);
+        $this->assertSame(1360, $post['amount_minor']);
+        $this->assertDatabaseCount('checkout_cod_bank_receipt_postings', 1);
+        $this->assertDatabaseCount('checkout_cod_bank_receipt_ledger_lines', 2);
+    }
+
+    public function test_bank_receipt38_exact_request_replay(): void
+    {
+        [, $draft, $refetch] = $this->bankReceipt38Source();
+        $key = (string) Str::uuid();
+        $a = $this->bankReceipt38Post($draft, $refetch, $key);
+        $b = $this->bankReceipt38Post($draft, $refetch, $key);
+        $this->assertSame($a['posting_id'], $b['posting_id']);
+        $this->assertTrue($b['idempotent_replay']);
+        $this->assertDatabaseCount('checkout_cod_bank_receipt_ledger_lines', 2);
+    }
+
+    public function test_bank_receipt38_new_uuid_cannot_post_same_source_twice(): void
+    {
+        [, $draft, $refetch] = $this->bankReceipt38Source();
+        $this->bankReceipt38Post($draft, $refetch);
+        $this->expectException(DomainException::class);
+        $this->bankReceipt38Post($draft, $refetch);
+    }
+
+    public function test_bank_receipt38_negative_refetch_blocks_posting(): void
+    {
+        [$source, $draft, $refetch] = $this->bankReceipt38Source();
+        $this->refetchRisk37Negative('single', $source);
+        $this->expectException(DomainException::class);
+        try {
+            $this->bankReceipt38Post($draft, $refetch);
+        } finally {
+            $this->assertDatabaseCount('checkout_cod_bank_receipt_postings', 0);
+        }
+    }
+
+    public function test_bank_receipt38_remote_changed_amount_blocks_posting(): void
+    {
+        [, $draft, $refetch] = $this->bankReceipt38Source();
+        $this->privatStatement30Fixture['transactions'][0]['SUM'] = '7.00';
+        $this->expectException(DomainException::class);
+        try {
+            $this->bankReceipt38Post($draft, $refetch);
+        } finally {
+            $this->assertDatabaseCount('checkout_cod_bank_receipt_postings', 0);
+        }
+    }
+
+    public function test_bank_receipt38_remote_transaction_identity_changed_blocks(): void
+    {
+        [, $draft, $refetch] = $this->bankReceipt38Source();
+        $this->privatStatement30Fixture['transactions'][0]['REFN'] = 'NEW38';
+        $this->expectException(DomainException::class);
+        $this->bankReceipt38Post($draft, $refetch);
+    }
+
+    public function test_bank_receipt38_remote_reference_missing_blocks(): void
+    {
+        [, $draft, $refetch] = $this->bankReceipt38Source();
+        $this->privatStatement30Fixture['transactions'][0]['REF'] = 'OTHER_BANK38';
+        $this->expectException(DomainException::class);
+        $this->bankReceipt38Post($draft, $refetch);
+    }
+
+    public function test_bank_receipt38_unreviewed_journal_cannot_post(): void
+    {
+        [$source, $packet] = $this->journal34Source();
+        $draft = $this->journal34Prepare($packet);
+        $this->bankRefetch36Gate();
+        $refetch = $this->bankRefetch36Run('single', $source);
+        $this->bankReceipt38Gate();
+        $this->expectException(DomainException::class);
+        $this->bankReceipt38Post($draft, $refetch);
+    }
+
+    public function test_bank_receipt38_fails_without_bank_refetch(): void
+    {
+        [, $packet] = $this->journal34Source();
+        $draft = $this->journal34Prepare($packet);
+        $this->journal34Review($draft);
+        $this->bankReceipt38Gate();
+        $this->expectException(DomainException::class);
+        $this->bankReceipt38Post($draft, ['operation_key' => (string) Str::uuid()]);
+    }
+
+    public function test_bank_receipt38_requires_permission(): void
+    {
+        [, $draft, $refetch] = $this->bankReceipt38Source();
+        $this->actor(999);
+        $this->expectException(AuthorizationException::class);
+        app(CheckoutCodBankReceiptPostingService::class)->post(
+            $draft['operation_key'], $refetch['operation_key'], (string) Str::uuid()
+        );
+    }
+
+    public function test_bank_receipt38_importer_cannot_be_posting_operator(): void
+    {
+        [, $draft, $refetch] = $this->bankReceipt38Source();
+        Gate::define(CheckoutCodBankReceiptPostingService::POST_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 3001);
+        $this->actor(3001);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodBankReceiptPostingService::class)->post(
+            $draft['operation_key'], $refetch['operation_key'], (string) Str::uuid()
+        );
+    }
+
+    public function test_bank_receipt38_refetcher_cannot_be_posting_operator(): void
+    {
+        [, $draft, $refetch] = $this->bankReceipt38Source();
+        Gate::define(CheckoutCodBankReceiptPostingService::POST_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 3601);
+        $this->actor(3601);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodBankReceiptPostingService::class)->post(
+            $draft['operation_key'], $refetch['operation_key'], (string) Str::uuid()
+        );
+    }
+
+    public function test_bank_receipt38_later_clean_refetch_preserves_posting_status(): void
+    {
+        [$source, $draft, $refetch] = $this->bankReceipt38Source();
+        $this->bankReceipt38Post($draft, $refetch);
+        $this->bankRefetch36Run('single', $source);
+        $this->actor(1200);
+        $status = app(CheckoutCodBankReceiptPostingStatusService::class)
+            ->inspect($draft['operation_key']);
+        $this->assertSame('bank_credit_posted', $status['status']);
+    }
+
+    public function test_bank_receipt38_connector_disabled_blocks_new_posting(): void
+    {
+        [, $draft, $refetch] = $this->bankReceipt38Source();
+        config()->set('services.privatbank_autoclient.enabled', false);
+        $this->expectException(DomainException::class);
+        $this->bankReceipt38Post($draft, $refetch);
+    }
+
+    public function test_bank_receipt38_posting_requires_both_ledger_sides_at_commit(): void
+    {
+        [, $draft, $refetch] = $this->bankReceipt38Source();
+        $view = app(CheckoutCodBankReceiptPostingEvaluator::class)
+            ->inspect($draft['operation_key'], $refetch['operation_key']);
+        try {
+            DB::transaction(static function () use ($view): void {
+                DB::table('checkout_cod_bank_receipt_postings')->insert([
+                    'operation_key' => (string) Str::uuid(),
+                    'journal_draft_id' => $view['journal_draft_id'],
+                    'refetch_id' => $view['refetch_id'],
+                    'statement_entry_id' => $view['statement_entry_id'],
+                    'source_kind' => $view['source_kind'],
+                    'source_id' => $view['source_id'],
+                    'reference_hmac' => $view['reference_hmac'],
+                    'transaction_hmac' => $view['transaction_hmac'],
+                    'row_hmac' => $view['row_hmac'],
+                    'account_alias' => $view['account_alias'],
+                    'booked_on' => $view['booked_on'],
+                    'amount_minor' => $view['amount_minor'],
+                    'api_result_sha256' => str_repeat('a', 64),
+                    'snapshot_hmac' => $view['snapshot_hmac'],
+                    'posted_by' => 3801,
+                    'request_hmac' => str_repeat('b', 64),
+                    'created_at' => now(),
+                ]);
+                DB::statement('SET CONSTRAINTS cod_brp_balance_at_commit IMMEDIATE');
+            });
+            $this->fail('Posting without balanced ledger lines was accepted');
+        } catch (QueryException $e) {
+            $this->assertStringContainsString('ledger must balance', $e->getMessage());
+        }
+        $this->assertDatabaseCount('checkout_cod_bank_receipt_postings', 0);
+    }
+
+    public function test_bank_receipt38_ledger_line_is_immutable(): void
+    {
+        [, $draft, $refetch] = $this->bankReceipt38Source();
+        $this->bankReceipt38Post($draft, $refetch);
+        $this->expectException(QueryException::class);
+        DB::table('checkout_cod_bank_receipt_ledger_lines')->update(['amount_minor' => 1]);
+    }
+
+    public function test_bank_receipt38_posted_receipt_remains_audited_after_new_anomaly(): void
+    {
+        [$source, $draft, $refetch] = $this->bankReceipt38Source();
+        $this->bankReceipt38Post($draft, $refetch);
+        $this->refetchRisk37Negative('single', $source);
+        $this->actor(1200);
+        $state = app(CheckoutCodBankReceiptPostingStatusService::class)
+            ->inspect($draft['operation_key']);
+        $this->assertSame('posted_bank_credit_requires_investigation', $state['status']);
+        $this->assertTrue($state['bank_credit_booked_in_internal_ledger']);
+        $this->assertFalse($state['cod_paid']);
+    }
+
+    public function test_bank_receipt38_status_reader_permission_required(): void
+    {
+        [, $draft, $refetch] = $this->bankReceipt38Source();
+        $this->bankReceipt38Post($draft, $refetch);
+        $this->actor(999);
+        $this->expectException(AuthorizationException::class);
+        app(CheckoutCodBankReceiptPostingStatusService::class)
+            ->inspect($draft['operation_key']);
     }
 
 }
