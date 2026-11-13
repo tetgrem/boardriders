@@ -11,7 +11,7 @@ use App\Services\Pricing\CheckoutCodOperationsReviewService;
 use App\Services\Pricing\CheckoutCodNovaPayRegisterCsvParser;
 use App\Services\Pricing\CheckoutCodNovaPayRegisterCsvImportService;
 use Illuminate\Http\UploadedFile;
-
+use App\Services\Pricing\CheckoutCodOperationsCaseService;
 use App\Services\Pricing\CheckoutCodBankReceiptPostingService;
 use App\Services\Pricing\CheckoutCodBankReceiptPostingEvaluator;
 use App\Services\Pricing\CheckoutCodBankReceiptPostingStatusService;
@@ -9837,6 +9837,493 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
             $snapshot,
             'request_evidence',
             'manual_recheck'
+        );
+    }
+    // ============================================================
+    // BLOCK 42 — MANAGED COD OPERATIONAL CASES
+    // ============================================================
+
+    private function codCase42Gate(): void
+    {
+        Gate::define(
+            CheckoutCodOperationsCaseService::MANAGE_ABILITY,
+            static fn ($u): bool => in_array(
+                (int) $u->getAuthIdentifier(),
+                [1200, 1201],
+                true
+            )
+        );
+
+        Gate::define(
+            CheckoutCodTtnInvestigationStatusService::VIEW_ABILITY,
+            static fn ($u): bool => in_array(
+                (int) $u->getAuthIdentifier(),
+                [1200, 1201],
+                true
+            )
+        );
+    }
+
+    private function codCase42Open(array $posting): array
+    {
+        $this->codCase42Gate();
+        $this->actor(1200);
+
+        return app(CheckoutCodOperationsCaseService::class)->open(
+            $posting['operation_key'],
+            (string) Str::uuid()
+        );
+    }
+
+    private function codCase42Action(
+        array $case,
+        string $action,
+        string $reason,
+        ?string $key = null
+    ): array {
+        return app(CheckoutCodOperationsCaseService::class)->act(
+            $case['case_key'],
+            $key ?? (string) Str::uuid(),
+            $case['revision'],
+            $case['snapshot_hmac'],
+            $action,
+            $reason
+        );
+    }
+
+    public function test_cod_case42_open_creates_single_audited_case(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $case = $this->codCase42Open($posting);
+
+        $this->assertSame('open', $case['case_status']);
+        $this->assertSame(1, $case['revision']);
+        $this->assertNull($case['assigned_to']);
+        $this->assertSame(
+            'awaiting_register',
+            $case['current_financial_status']
+        );
+        $this->assertFalse($case['cod_paid']);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_operations_cases',
+            1
+        );
+        $this->assertDatabaseCount(
+            'checkout_cod_operations_case_events',
+            1
+        );
+    }
+
+    public function test_cod_case42_open_replay_is_idempotent(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $this->codCase42Gate();
+        $this->actor(1200);
+
+        $service = app(CheckoutCodOperationsCaseService::class);
+        $key = (string) Str::uuid();
+
+        $first = $service->open($posting['operation_key'], $key);
+        $again = $service->open($posting['operation_key'], $key);
+
+        $this->assertSame(
+            $first['case_id'],
+            $again['case_id']
+        );
+        $this->assertSame(
+            $first['event_id'],
+            $again['event_id']
+        );
+        $this->assertTrue($again['idempotent_replay']);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_operations_case_events',
+            1
+        );
+    }
+
+    public function test_cod_case42_second_case_for_same_posting_is_rejected(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $this->codCase42Open($posting);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodOperationsCaseService::class)->open(
+            $posting['operation_key'],
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_cod_case42_claim_wait_resume_and_release(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $case = $this->codCase42Open($posting);
+
+        $case = $this->codCase42Action(
+            $case,
+            'claim',
+            'start_work'
+        );
+
+        $this->assertSame('in_progress', $case['case_status']);
+        $this->assertSame(1200, $case['assigned_to']);
+
+        $case = $this->codCase42Action(
+            $case,
+            'request_evidence',
+            'source_proof_needed'
+        );
+
+        $this->assertSame(
+            'waiting_external',
+            $case['case_status']
+        );
+
+        $case = $this->codCase42Action(
+            $case,
+            'resume',
+            'evidence_received'
+        );
+
+        $this->assertSame('in_progress', $case['case_status']);
+
+        $case = $this->codCase42Action(
+            $case,
+            'release',
+            'reassign_required'
+        );
+
+        $this->assertSame('open', $case['case_status']);
+        $this->assertNull($case['assigned_to']);
+        $this->assertSame(5, $case['revision']);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_operations_case_events',
+            5
+        );
+    }
+
+    public function test_cod_case42_other_agent_cannot_release_someones_case(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $case = $this->codCase42Open($posting);
+        $case = $this->codCase42Action(
+            $case,
+            'claim',
+            'start_work'
+        );
+
+        $this->actor(1201);
+
+        $this->expectException(DomainException::class);
+
+        $this->codCase42Action(
+            $case,
+            'release',
+            'reassign_required'
+        );
+    }
+
+    public function test_cod_case42_action_replay_does_not_repeat_event(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $case = $this->codCase42Open($posting);
+        $key = (string) Str::uuid();
+
+        $first = $this->codCase42Action(
+            $case,
+            'claim',
+            'start_work',
+            $key
+        );
+
+        $again = $this->codCase42Action(
+            $case,
+            'claim',
+            'start_work',
+            $key
+        );
+
+        $this->assertSame(
+            $first['event_id'],
+            $again['event_id']
+        );
+
+        $this->assertTrue($again['idempotent_replay']);
+        $this->assertSame(2, $again['revision']);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_operations_case_events',
+            2
+        );
+    }
+
+    public function test_cod_case42_changed_replay_is_rejected(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $case = $this->codCase42Open($posting);
+        $key = (string) Str::uuid();
+
+        $this->codCase42Action(
+            $case,
+            'claim',
+            'start_work',
+            $key
+        );
+
+        $this->expectException(DomainException::class);
+
+        $this->codCase42Action(
+            $case,
+            'release',
+            'reassign_required',
+            $key
+        );
+    }
+
+    public function test_cod_case42_old_revision_cannot_override_new_assignment(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $case = $this->codCase42Open($posting);
+
+        $this->codCase42Action(
+            $case,
+            'claim',
+            'start_work'
+        );
+
+        $this->expectException(DomainException::class);
+
+        $this->codCase42Action(
+            $case,
+            'claim',
+            'start_work'
+        );
+    }
+
+    public function test_cod_case42_later_refetch_is_visible_as_stale(): void
+    {
+        [$source, $posting] = $this->novapayRegister39Source();
+
+        $case = $this->codCase42Open($posting);
+
+        $this->refetchRisk37Negative('single', $source);
+
+        // Restore permissions after the negative refetch fixture.
+        $this->codCase42Gate();
+        $this->actor(1200);
+
+        $changed = app(CheckoutCodOperationsCaseService::class)
+            ->inspect($case['case_key']);
+
+        $this->assertTrue($changed['evidence_changed']);
+        $this->assertSame(
+            'critical',
+            $changed['current_priority']
+        );
+
+        $this->expectException(DomainException::class);
+
+        $this->codCase42Action(
+            $case,
+            'claim',
+            'start_work'
+        );
+    }
+
+    public function test_cod_case42_refresh_reopens_and_updates_snapshot(): void
+    {
+        [$source, $posting] = $this->novapayRegister39Source();
+
+        $case = $this->codCase42Open($posting);
+
+        $case = $this->codCase42Action(
+            $case,
+            'claim',
+            'start_work'
+        );
+
+        $this->refetchRisk37Negative('single', $source);
+
+        $this->codCase42Gate();
+        $this->actor(1200);
+
+        $refreshed = $this->codCase42Action(
+            $case,
+            'refresh',
+            'evidence_changed'
+        );
+
+        $this->assertSame('open', $refreshed['case_status']);
+        $this->assertSame('critical', $refreshed['priority']);
+        $this->assertNull($refreshed['assigned_to']);
+        $this->assertFalse($refreshed['evidence_changed']);
+        $this->assertSame(3, $refreshed['revision']);
+        $this->assertFalse($refreshed['cod_paid']);
+    }
+
+    public function test_cod_case42_refresh_without_change_is_rejected(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $case = $this->codCase42Open($posting);
+
+        $this->expectException(DomainException::class);
+
+        $this->codCase42Action(
+            $case,
+            'refresh',
+            'evidence_changed'
+        );
+    }
+
+    public function test_cod_case42_unverified_case_cannot_be_closed(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $case = $this->codCase42Open($posting);
+
+        $case = $this->codCase42Action(
+            $case,
+            'claim',
+            'start_work'
+        );
+
+        $this->expectException(DomainException::class);
+
+        $this->codCase42Action(
+            $case,
+            'close',
+            'comparison_only'
+        );
+    }
+
+    public function test_cod_case42_queue_and_history_are_paginated(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $case = $this->codCase42Open($posting);
+
+        $case = $this->codCase42Action(
+            $case,
+            'claim',
+            'start_work'
+        );
+
+        $service = app(CheckoutCodOperationsCaseService::class);
+
+        $mine = $service->queue(null, 20, 'mine');
+
+        $this->assertCount(1, $mine['items']);
+        $this->assertSame(
+            $case['case_key'],
+            $mine['items'][0]['case_key']
+        );
+
+        $history = $service->history(
+            $case['case_key'],
+            null,
+            1
+        );
+
+        $this->assertCount(1, $history['items']);
+        $this->assertSame(
+            'claim',
+            $history['items'][0]['action']
+        );
+        $this->assertNotNull($history['next_before_id']);
+
+        $older = $service->history(
+            $case['case_key'],
+            $history['next_before_id'],
+            1
+        );
+
+        $this->assertSame(
+            'open',
+            $older['items'][0]['action']
+        );
+    }
+
+    public function test_cod_case42_immutable_event_cannot_be_updated(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $this->codCase42Open($posting);
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_operations_case_events')->update([
+            'reason_code' => 'tampered',
+        ]);
+    }
+
+    public function test_cod_case42_direct_case_revision_bypass_is_rejected(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $case = $this->codCase42Open($posting);
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_operations_cases')
+            ->where('case_key', $case['case_key'])
+            ->update([
+                'case_status' => 'in_progress',
+                'assigned_to' => 1200,
+            ]);
+    }
+
+    public function test_cod_case42_workflow_requires_permission(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $this->codCase42Gate();
+        $this->actor(999);
+
+        $this->expectException(
+            AuthorizationException::class
+        );
+
+        app(CheckoutCodOperationsCaseService::class)->open(
+            $posting['operation_key'],
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_cod_case42_original_bank_poster_cannot_manage_case(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        Gate::define(
+            CheckoutCodOperationsCaseService::MANAGE_ABILITY,
+            static fn ($u): bool =>
+                (int) $u->getAuthIdentifier() === 3801
+        );
+
+        Gate::define(
+            CheckoutCodTtnInvestigationStatusService::VIEW_ABILITY,
+            static fn ($u): bool =>
+                (int) $u->getAuthIdentifier() === 3801
+        );
+
+        $this->actor(3801);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodOperationsCaseService::class)->open(
+            $posting['operation_key'],
+            (string) Str::uuid()
         );
     }
 }

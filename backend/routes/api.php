@@ -131,3 +131,53 @@ Route::post(
     )->middleware('throttle:10,1');
 
 });
+
+
+// ============================================================
+// BOARDRIDERS BLOCK 42 — COD OPERATIONS CASE WORKFLOW
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])->group(function (): void {
+
+    \Illuminate\Support\Facades\Route::get(
+        '/v1/admin/cod/operation-cases',
+        [
+            \App\Http\Controllers\Api\CheckoutCodOperationsCaseController::class,
+            'index',
+        ]
+    )->middleware('throttle:30,1');
+
+    \Illuminate\Support\Facades\Route::post(
+        '/v1/admin/cod/operations/{postingKey}/cases',
+        [
+            \App\Http\Controllers\Api\CheckoutCodOperationsCaseController::class,
+            'open',
+        ]
+    )->middleware('throttle:10,1');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/v1/admin/cod/operation-cases/{caseKey}',
+        [
+            \App\Http\Controllers\Api\CheckoutCodOperationsCaseController::class,
+            'show',
+        ]
+    )->middleware('throttle:30,1');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/v1/admin/cod/operation-cases/{caseKey}/history',
+        [
+            \App\Http\Controllers\Api\CheckoutCodOperationsCaseController::class,
+            'history',
+        ]
+    )->middleware('throttle:30,1');
+
+    \Illuminate\Support\Facades\Route::post(
+        '/v1/admin/cod/operation-cases/{caseKey}/actions',
+        [
+            \App\Http\Controllers\Api\CheckoutCodOperationsCaseController::class,
+            'action',
+        ]
+    )->middleware('throttle:10,1');
+});
