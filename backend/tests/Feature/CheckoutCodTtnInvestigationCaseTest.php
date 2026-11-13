@@ -15,7 +15,11 @@ use App\Services\Pricing\CheckoutCodOperationsCaseService;
 use App\Services\Pricing\CheckoutCodBankReceiptPostingService;
 use App\Services\Pricing\CheckoutCodBankReceiptPostingEvaluator;
 use App\Services\Pricing\CheckoutCodBankReceiptPostingStatusService;
-
+use App\Jobs\DeliverCheckoutCodCaseAlert;
+use App\Services\Pricing\CheckoutCodCaseAlertPolicy;
+use App\Services\Pricing\CheckoutCodCaseAlertService;
+use App\Services\Pricing\CheckoutCodCaseAlertInboxService;
+use Illuminate\Support\Facades\Queue;
 use App\Services\Pricing\CheckoutCodRefetchRiskStatusService;
 
 use App\Services\Pricing\CheckoutCodAdjustmentPlanService;
@@ -10325,5 +10329,570 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
             $posting['operation_key'],
             (string) Str::uuid()
         );
+    }
+    // ============================================================
+    // BLOCK 43 — SLA OUTBOX, QUEUE AND CRM INBOX
+    // ============================================================
+
+    private function codAlert43Gate(): void
+    {
+        $this->codCase42Gate();
+
+        Gate::define(
+            CheckoutCodCaseAlertInboxService::TRIAGE_ABILITY,
+            static fn ($u): bool =>
+                (int) $u->getAuthIdentifier() === 1201
+        );
+    }
+
+    private function codAlert43Open(): array
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $this->codAlert43Gate();
+        $this->actor(1200);
+
+        return $this->codCase42Open($posting);
+    }
+
+    private function codAlert43Time(
+        array $case,
+        int $minutesAfterDue
+    ): void {
+        CarbonImmutable::setTestNow(
+            CarbonImmutable::parse($case['sla_due_at'])
+                ->addMinutes($minutesAfterDue)
+        );
+    }
+
+    public function test_cod_alert43_new_case_does_not_alert_early(): void
+    {
+        $this->codAlert43Open();
+
+        $result = app(
+            CheckoutCodCaseAlertService::class
+        )->scan();
+
+        $this->assertSame(1, $result['scanned']);
+        $this->assertSame(0, $result['created']);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_case_alert_outbox',
+            0
+        );
+    }
+
+    public function test_cod_alert43_open_unassigned_case_generates_one_alert(): void
+    {
+        $case = $this->codAlert43Open();
+
+        CarbonImmutable::setTestNow(
+            CarbonImmutable::parse($case['sla_due_at'])
+                ->subHours(23)
+        );
+
+        $service = app(
+            CheckoutCodCaseAlertService::class
+        );
+
+        $first = $service->scan();
+        $again = $service->scan();
+
+        $this->assertSame(1, $first['created']);
+        $this->assertSame(0, $again['created']);
+
+        $this->assertDatabaseHas(
+            'checkout_cod_case_alert_outbox',
+            [
+                'case_id' => $case['case_id'],
+                'case_revision' => 1,
+                'alert_kind' => 'unassigned_30m',
+                'recipient_id' => null,
+            ]
+        );
+    }
+
+    public function test_cod_alert43_due_soon_alert_is_separate_and_deduplicated(): void
+    {
+        $case = $this->codAlert43Open();
+
+        $this->codAlert43Time($case, -30);
+
+        $service = app(
+            CheckoutCodCaseAlertService::class
+        );
+
+        $r = $service->scan();
+
+        $this->assertSame(2, $r['created']);
+
+        $this->assertDatabaseHas(
+            'checkout_cod_case_alert_outbox',
+            [
+                'alert_kind' => 'due_soon',
+                'case_id' => $case['case_id'],
+            ]
+        );
+
+        $service->scan();
+
+        $this->assertDatabaseCount(
+            'checkout_cod_case_alert_outbox',
+            2
+        );
+    }
+
+    public function test_cod_alert43_overdue_escalates_to_team_in_stages(): void
+    {
+        $case = $this->codAlert43Open();
+
+        $this->codAlert43Time(
+            $case,
+            60 * 25
+        );
+
+        $r = app(
+            CheckoutCodCaseAlertService::class
+        )->scan();
+
+        $this->assertSame(4, $r['created']);
+
+        foreach ([
+                     'unassigned_30m',
+                     'overdue',
+                     'overdue_4h',
+                     'overdue_24h',
+                 ] as $kind) {
+            $this->assertDatabaseHas(
+                'checkout_cod_case_alert_outbox',
+                [
+                    'case_id' => $case['case_id'],
+                    'alert_kind' => $kind,
+                ]
+            );
+        }
+    }
+
+    public function test_cod_alert43_enqueue_is_throttled_and_retryable(): void
+    {
+        $case = $this->codAlert43Open();
+
+        $this->codAlert43Time($case, 30);
+
+        app(CheckoutCodCaseAlertService::class)->scan();
+
+        Queue::fake();
+
+        $service = app(
+            CheckoutCodCaseAlertService::class
+        );
+
+        $first = $service->enqueue(10);
+        $second = $service->enqueue(10);
+
+        $this->assertSame(2, $first['enqueued']);
+        $this->assertSame(0, $second['enqueued']);
+
+        Queue::assertPushed(
+            DeliverCheckoutCodCaseAlert::class,
+            2
+        );
+
+        CarbonImmutable::setTestNow(
+            CarbonImmutable::now('UTC')->addMinutes(6)
+        );
+
+        $retry = $service->enqueue(10);
+
+        $this->assertSame(2, $retry['enqueued']);
+    }
+
+    public function test_cod_alert43_job_delivers_to_team_inbox_and_is_idempotent(): void
+    {
+        $case = $this->codAlert43Open();
+
+        $this->codAlert43Time($case, 30);
+
+        app(CheckoutCodCaseAlertService::class)->scan();
+
+        $id = (int) DB::table(
+            'checkout_cod_case_alert_outbox'
+        )
+            ->where('alert_kind', 'overdue')
+            ->value('id');
+
+        $job = new DeliverCheckoutCodCaseAlert($id);
+
+        $job->handle(
+            app(CheckoutCodCaseAlertPolicy::class)
+        );
+
+        $job->handle(
+            app(CheckoutCodCaseAlertPolicy::class)
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_case_alert_inbox',
+            1
+        );
+
+        $this->assertNotNull(
+            DB::table('checkout_cod_case_alert_outbox')
+                ->where('id', $id)
+                ->value('delivered_at')
+        );
+
+        $this->actor(1201);
+
+        $inbox = app(
+            CheckoutCodCaseAlertInboxService::class
+        )->listing('team');
+
+        $this->assertCount(1, $inbox['items']);
+
+        $this->assertSame(
+            'overdue',
+            $inbox['items'][0]['kind']
+        );
+
+        $this->assertFalse($inbox['cod_paid']);
+    }
+
+    public function test_cod_alert43_old_alert_is_suppressed_after_case_revision_change(): void
+    {
+        $case = $this->codAlert43Open();
+
+        CarbonImmutable::setTestNow(
+            CarbonImmutable::parse($case['sla_due_at'])
+                ->subHours(23)
+        );
+
+        app(CheckoutCodCaseAlertService::class)->scan();
+
+        $id = (int) DB::table(
+            'checkout_cod_case_alert_outbox'
+        )->value('id');
+
+        $this->codCase42Action(
+            $case,
+            'claim',
+            'start_work'
+        );
+
+        (new DeliverCheckoutCodCaseAlert($id))->handle(
+            app(CheckoutCodCaseAlertPolicy::class)
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_case_alert_inbox',
+            0
+        );
+
+        $this->assertNotNull(
+            DB::table('checkout_cod_case_alert_outbox')
+                ->where('id', $id)
+                ->value('suppressed_at')
+        );
+    }
+
+    public function test_cod_alert43_job_suppresses_expired_due_soon_event(): void
+    {
+        $case = $this->codAlert43Open();
+
+        $this->codAlert43Time($case, -30);
+
+        app(CheckoutCodCaseAlertService::class)->scan();
+
+        $id = (int) DB::table(
+            'checkout_cod_case_alert_outbox'
+        )
+            ->where('alert_kind', 'due_soon')
+            ->value('id');
+
+        $this->codAlert43Time($case, 20);
+
+        (new DeliverCheckoutCodCaseAlert($id))->handle(
+            app(CheckoutCodCaseAlertPolicy::class)
+        );
+
+        $this->assertNotNull(
+            DB::table('checkout_cod_case_alert_outbox')
+                ->where('id', $id)
+                ->value('suppressed_at')
+        );
+    }
+
+    public function test_cod_alert43_assigned_overdue_goes_to_owner_inbox(): void
+    {
+        $case = $this->codAlert43Open();
+
+        $this->codCase42Action(
+            $case,
+            'claim',
+            'start_work'
+        );
+
+        $this->codAlert43Time($case, 30);
+
+        app(CheckoutCodCaseAlertService::class)->scan();
+
+        $id = (int) DB::table(
+            'checkout_cod_case_alert_outbox'
+        )
+            ->where('alert_kind', 'overdue')
+            ->value('id');
+
+        (new DeliverCheckoutCodCaseAlert($id))->handle(
+            app(CheckoutCodCaseAlertPolicy::class)
+        );
+
+        $this->actor(1200);
+
+        $list = app(
+            CheckoutCodCaseAlertInboxService::class
+        )->listing('mine');
+
+        $this->assertCount(1, $list['items']);
+
+        $this->assertSame(
+            1200,
+            $list['items'][0]['recipient_id']
+        );
+    }
+
+    public function test_cod_alert43_acknowledgement_is_idempotent_and_audited(): void
+    {
+        $case = $this->codAlert43Open();
+
+        $this->codCase42Action(
+            $case,
+            'claim',
+            'start_work'
+        );
+
+        $this->codAlert43Time($case, 30);
+
+        app(CheckoutCodCaseAlertService::class)->scan();
+
+        $id = (int) DB::table(
+            'checkout_cod_case_alert_outbox'
+        )
+            ->where('alert_kind', 'overdue')
+            ->value('id');
+
+        (new DeliverCheckoutCodCaseAlert($id))->handle(
+            app(CheckoutCodCaseAlertPolicy::class)
+        );
+
+        $notificationId = (int) DB::table(
+            'checkout_cod_case_alert_inbox'
+        )->value('id');
+
+        $inbox = app(
+            CheckoutCodCaseAlertInboxService::class
+        );
+
+        $a = $inbox->acknowledge($notificationId);
+        $b = $inbox->acknowledge($notificationId);
+
+        $this->assertSame(1200, $a['read_by']);
+        $this->assertFalse($a['already_acknowledged']);
+        $this->assertTrue($b['already_acknowledged']);
+        $this->assertFalse($b['payment_status_changed']);
+    }
+
+    public function test_cod_alert43_team_ack_requires_triage_permission(): void
+    {
+        $case = $this->codAlert43Open();
+
+        $this->codAlert43Time($case, 30);
+
+        app(CheckoutCodCaseAlertService::class)->scan();
+
+        $id = (int) DB::table(
+            'checkout_cod_case_alert_outbox'
+        )
+            ->where('alert_kind', 'overdue')
+            ->value('id');
+
+        (new DeliverCheckoutCodCaseAlert($id))->handle(
+            app(CheckoutCodCaseAlertPolicy::class)
+        );
+
+        $notificationId = (int) DB::table(
+            'checkout_cod_case_alert_inbox'
+        )->value('id');
+
+        $this->actor(1200);
+
+        $this->expectException(
+            AuthorizationException::class
+        );
+
+        app(
+            CheckoutCodCaseAlertInboxService::class
+        )->acknowledge($notificationId);
+    }
+
+    public function test_cod_alert43_team_triager_can_acknowledge_team_alert(): void
+    {
+        $case = $this->codAlert43Open();
+
+        $this->codAlert43Time($case, 30);
+
+        app(CheckoutCodCaseAlertService::class)->scan();
+
+        $id = (int) DB::table(
+            'checkout_cod_case_alert_outbox'
+        )
+            ->where('alert_kind', 'overdue')
+            ->value('id');
+
+        (new DeliverCheckoutCodCaseAlert($id))->handle(
+            app(CheckoutCodCaseAlertPolicy::class)
+        );
+
+        $notificationId = (int) DB::table(
+            'checkout_cod_case_alert_inbox'
+        )->value('id');
+
+        $this->actor(1201);
+
+        $r = app(
+            CheckoutCodCaseAlertInboxService::class
+        )->acknowledge($notificationId);
+
+        $this->assertSame(1201, $r['read_by']);
+    }
+
+    public function test_cod_alert43_another_agent_cannot_read_mine_or_ack(): void
+    {
+        $case = $this->codAlert43Open();
+
+        $this->codCase42Action(
+            $case,
+            'claim',
+            'start_work'
+        );
+
+        $this->codAlert43Time($case, 30);
+
+        app(CheckoutCodCaseAlertService::class)->scan();
+
+        $id = (int) DB::table(
+            'checkout_cod_case_alert_outbox'
+        )
+            ->where('alert_kind', 'overdue')
+            ->value('id');
+
+        (new DeliverCheckoutCodCaseAlert($id))->handle(
+            app(CheckoutCodCaseAlertPolicy::class)
+        );
+
+        $notificationId = (int) DB::table(
+            'checkout_cod_case_alert_inbox'
+        )->value('id');
+
+        $this->actor(1201);
+
+        $this->assertSame(
+            [],
+            app(CheckoutCodCaseAlertInboxService::class)
+                ->listing('mine')['items']
+        );
+
+        $this->expectException(
+            AuthorizationException::class
+        );
+
+        app(
+            CheckoutCodCaseAlertInboxService::class
+        )->acknowledge($notificationId);
+    }
+
+    public function test_cod_alert43_inbox_event_cannot_be_rewritten_after_receipt(): void
+    {
+        $case = $this->codAlert43Open();
+
+        $this->codAlert43Time($case, 30);
+
+        app(CheckoutCodCaseAlertService::class)->scan();
+
+        $id = (int) DB::table(
+            'checkout_cod_case_alert_outbox'
+        )
+            ->where('alert_kind', 'overdue')
+            ->value('id');
+
+        (new DeliverCheckoutCodCaseAlert($id))->handle(
+            app(CheckoutCodCaseAlertPolicy::class)
+        );
+
+        $this->actor(1201);
+
+        $notificationId = (int) DB::table(
+            'checkout_cod_case_alert_inbox'
+        )->value('id');
+
+        app(
+            CheckoutCodCaseAlertInboxService::class
+        )->acknowledge($notificationId);
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_case_alert_inbox')
+            ->where('id', $notificationId)
+            ->update([
+                'read_by' => 1200,
+            ]);
+    }
+
+    public function test_cod_alert43_artisan_command_scans_and_queues_jobs(): void
+    {
+        $case = $this->codAlert43Open();
+
+        $this->codAlert43Time($case, 30);
+
+        Queue::fake();
+
+        $exit = Artisan::call(
+            'cod:case-alerts',
+            [
+                '--limit' => 50,
+                '--enqueue-limit' => 50,
+            ]
+        );
+
+        $this->assertSame(0, $exit);
+
+        Queue::assertPushed(
+            DeliverCheckoutCodCaseAlert::class,
+            2
+        );
+    }
+
+    public function test_cod_alert43_invalid_batch_limits_fail_closed(): void
+    {
+        $this->expectException(
+            InvalidArgumentException::class
+        );
+
+        app(
+            CheckoutCodCaseAlertService::class
+        )->scan(0);
+    }
+
+    public function test_cod_alert43_inbox_requires_cod_view_permission(): void
+    {
+        $this->codAlert43Gate();
+        $this->actor(999);
+
+        $this->expectException(
+            AuthorizationException::class
+        );
+
+        app(
+            CheckoutCodCaseAlertInboxService::class
+        )->listing('mine');
     }
 }

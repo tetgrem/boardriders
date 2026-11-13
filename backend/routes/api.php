@@ -181,3 +181,30 @@ Route::post(
         ]
     )->middleware('throttle:10,1');
 });
+
+
+// ============================================================
+// BOARDRIDERS BLOCK 43 — CRM COD SLA ALERT INBOX
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])->group(function (): void {
+
+    \Illuminate\Support\Facades\Route::get(
+        '/v1/admin/cod/case-alerts',
+        [
+            \App\Http\Controllers\Api\CheckoutCodCaseAlertController::class,
+            'index',
+        ]
+    )->middleware('throttle:30,1');
+
+    \Illuminate\Support\Facades\Route::post(
+        '/v1/admin/cod/case-alerts/{notificationId}/acknowledge',
+        [
+            \App\Http\Controllers\Api\CheckoutCodCaseAlertController::class,
+            'acknowledge',
+        ]
+    )->whereNumber('notificationId')
+        ->middleware('throttle:20,1');
+});

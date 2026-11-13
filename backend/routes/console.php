@@ -14,3 +14,12 @@ Artisan::command('inspire', function () {
 Schedule::command('cod:tracking-poll --limit=25')
     ->everyFifteenMinutes()
     ->withoutOverlapping();
+
+
+// BOARDRIDERS BLOCK 43 — COD case alert monitor.
+
+Schedule::command(
+    'cod:case-alerts --limit=100 --enqueue-limit=100'
+)
+    ->everyMinute()
+    ->withoutOverlapping(10);
