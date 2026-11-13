@@ -11,6 +11,8 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 
+use App\Http\Controllers\Api\CheckoutCodNovaPayRegisterCsvImportController;
+
 use App\Http\Controllers\Api\CheckoutCodBankEvidenceController;
 
 use App\Http\Controllers\Api\CheckoutCodFinancialGatewayController;
@@ -86,3 +88,11 @@ Route::post(
     '/v1/cod/bank-evidence/ingest',
     CheckoutCodBankEvidenceController::class
 )->middleware('throttle:30,1');
+
+
+Route::post(
+    '/v1/admin/cod/novapay/register/csv-import',
+    CheckoutCodNovaPayRegisterCsvImportController::class
+)
+    ->middleware(['auth:sanctum', 'throttle:5,1'])
+    ->name('cod.novapay.register.csv-import');

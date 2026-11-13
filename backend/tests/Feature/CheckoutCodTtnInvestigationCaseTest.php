@@ -2,9 +2,14 @@
 
 namespace Tests\Feature;
 
-
+use App\Services\Pricing\CheckoutCodNovaPayRegisterService;
+use App\Services\Pricing\CheckoutCodNovaPayRegisterStatusService;
 use App\Services\Pricing\CheckoutCodPrivatRefetchService;
 use App\Services\Pricing\CheckoutCodPrivatRefetchStatusService;
+
+use App\Services\Pricing\CheckoutCodNovaPayRegisterCsvParser;
+use App\Services\Pricing\CheckoutCodNovaPayRegisterCsvImportService;
+use Illuminate\Http\UploadedFile;
 
 use App\Services\Pricing\CheckoutCodBankReceiptPostingService;
 use App\Services\Pricing\CheckoutCodBankReceiptPostingEvaluator;
@@ -8876,6 +8881,499 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
         $this->expectException(AuthorizationException::class);
         app(CheckoutCodBankReceiptPostingStatusService::class)
             ->inspect($draft['operation_key']);
+    }
+    // ============================================================
+    // BLOCK 39 — NORMALIZED NOVAPAY AFTERPAYMENT REGISTRY CLAIMS
+    // ============================================================
+
+    private function novapayRegister39Gate(): void
+    {
+        Gate::define(CheckoutCodNovaPayRegisterService::CAPTURE_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 3901);
+    }
+
+    private function novapayRegister39Source(bool $multi = false): array
+    {
+        [$source, $draft, $refetch] = $this->bankReceipt38Source(
+            $multi ? 'batch' : 'single', $multi
+        );
+        $post = $this->bankReceipt38Post($draft, $refetch);
+        $packetId = DB::table('checkout_cod_journal_drafts')
+            ->where('id', $post['journal_draft_id'])->value('coverage_packet_id');
+        $allocated = DB::table('checkout_cod_bank_coverage_lines as l')
+            ->join('orders as o', 'o.id', '=', 'l.order_id')
+            ->where('l.packet_id', $packetId)->orderBy('o.id')->get([
+                'o.order_key', 'l.gross_minor', 'l.fee_minor', 'l.allocated_minor',
+            ]);
+        $rows = [];
+        foreach ($allocated as $i => $r) {
+            $rows[] = [
+                'order_key' => (string) $r->order_key,
+                'shipment_number' => '20450000000' . str_pad((string) ($i + 1), 3, '0', STR_PAD_LEFT),
+                'external_payment_ref' => 'NOVAPAY_REG_39_' . ($i + 1),
+                'gross_minor' => (int) $r->gross_minor,
+                'fee_minor' => (int) $r->fee_minor,
+                'net_minor' => (int) $r->allocated_minor,
+            ];
+        }
+        $this->novapayRegister39Gate();
+        return [$source, $post, $rows];
+    }
+
+    private function novapayRegister39Capture(
+        array $post, array $rows, ?string $key = null,
+        string $documentSha256 = ''
+    ): array {
+        $this->actor(3901);
+        return app(CheckoutCodNovaPayRegisterService::class)->capture(
+            $post['operation_key'], $key ?? (string) Str::uuid(),
+            $documentSha256 !== '' ? $documentSha256 : str_repeat('b', 64),
+            $rows
+        );
+    }
+
+    public function test_novapay_register39_one_order_matches_bank_receipt_without_paid(): void
+    {
+        [, $post, $rows] = $this->novapayRegister39Source();
+        $capture = $this->novapayRegister39Capture($post, $rows);
+        $this->assertSame(1, $capture['orders_count']);
+        $this->assertSame(2000, $capture['gross_minor']);
+        $this->assertSame(1320, $capture['fee_minor']);
+        $this->assertSame(680, $capture['bank_minor']);
+        $this->assertFalse($capture['novapay_origin_authenticated']);
+        $this->assertFalse($capture['cod_paid']);
+        $this->assertSame('pending', DB::table('orders')
+            ->where('order_key', $this->orderKey)->value('payment_status'));
+        $this->assertDatabaseCount('checkout_cod_novapay_register_lines', 1);
+        $this->actor(1200);
+        $state = app(CheckoutCodNovaPayRegisterStatusService::class)
+            ->inspect($post['operation_key']);
+        $this->assertSame(
+            'novapay_register_allocation_matched_origin_unverified', $state['status']
+        );
+    }
+
+    public function test_novapay_register39_two_order_batch_matches_one_bank_posting(): void
+    {
+        [, $post, $rows] = $this->novapayRegister39Source(true);
+        $capture = $this->novapayRegister39Capture($post, $rows);
+        $this->assertSame(2, $capture['orders_count']);
+        $this->assertSame(4000, $capture['gross_minor']);
+        $this->assertSame(2640, $capture['fee_minor']);
+        $this->assertSame(1360, $capture['bank_minor']);
+        $this->assertDatabaseCount('checkout_cod_novapay_register_captures', 1);
+        $this->assertDatabaseCount('checkout_cod_novapay_register_lines', 2);
+    }
+
+    public function test_novapay_register39_same_request_is_idempotent(): void
+    {
+        [, $post, $rows] = $this->novapayRegister39Source();
+        $key = (string) Str::uuid();
+        $first = $this->novapayRegister39Capture($post, $rows, $key);
+        $second = $this->novapayRegister39Capture($post, $rows, $key);
+        $this->assertSame($first['capture_id'], $second['capture_id']);
+        $this->assertTrue($second['idempotent_replay']);
+        $this->assertDatabaseCount('checkout_cod_novapay_register_lines', 1);
+    }
+
+    public function test_novapay_register39_reused_uuid_with_new_document_rejected(): void
+    {
+        [, $post, $rows] = $this->novapayRegister39Source();
+        $key = (string) Str::uuid();
+        $this->novapayRegister39Capture($post, $rows, $key);
+        $this->expectException(DomainException::class);
+        $this->novapayRegister39Capture($post, $rows, $key, str_repeat('c', 64));
+    }
+
+    public function test_novapay_register39_second_capture_for_same_bank_posting_rejected(): void
+    {
+        [, $post, $rows] = $this->novapayRegister39Source();
+        $this->novapayRegister39Capture($post, $rows);
+        $this->expectException(DomainException::class);
+        $this->novapayRegister39Capture($post, $rows);
+    }
+
+    public function test_novapay_register39_missing_order_blocks_whole_batch(): void
+    {
+        [, $post, $rows] = $this->novapayRegister39Source(true);
+        array_pop($rows);
+        $this->expectException(InvalidArgumentException::class);
+        try {
+            $this->novapayRegister39Capture($post, $rows);
+        } finally {
+            $this->assertDatabaseCount('checkout_cod_novapay_register_captures', 0);
+        }
+    }
+
+    public function test_novapay_register39_wrong_net_amount_blocks_whole_batch(): void
+    {
+        [, $post, $rows] = $this->novapayRegister39Source(true);
+        $rows[0]['net_minor']++;
+        $this->expectException(InvalidArgumentException::class);
+        $this->novapayRegister39Capture($post, $rows);
+    }
+
+    public function test_novapay_register39_duplicate_payment_reference_rejected(): void
+    {
+        [, $post, $rows] = $this->novapayRegister39Source(true);
+        $rows[1]['external_payment_ref'] = $rows[0]['external_payment_ref'];
+        $this->expectException(InvalidArgumentException::class);
+        $this->novapayRegister39Capture($post, $rows);
+    }
+
+    public function test_novapay_register39_no_capture_status(): void
+    {
+        [, $post] = $this->novapayRegister39Source();
+        $this->actor(1200);
+        $state = app(CheckoutCodNovaPayRegisterStatusService::class)
+            ->inspect($post['operation_key']);
+        $this->assertSame('awaiting_novapay_register_extract', $state['status']);
+        $this->assertFalse($state['cod_paid']);
+    }
+
+    public function test_novapay_register39_later_bank_anomaly_flags_saved_capture(): void
+    {
+        [$source, $post, $rows] = $this->novapayRegister39Source();
+        $this->novapayRegister39Capture($post, $rows);
+        $this->refetchRisk37Negative('single', $source);
+        $this->actor(1200);
+        $state = app(CheckoutCodNovaPayRegisterStatusService::class)
+            ->inspect($post['operation_key']);
+        $this->assertSame('novapay_register_claim_requires_investigation', $state['status']);
+        $this->assertTrue($state['refetch_anomaly']);
+        $this->assertFalse($state['cod_paid']);
+    }
+
+    public function test_novapay_register39_cannot_capture_after_bank_anomaly(): void
+    {
+        [$source, $post, $rows] = $this->novapayRegister39Source();
+        $this->refetchRisk37Negative('single', $source);
+        $this->expectException(DomainException::class);
+        $this->novapayRegister39Capture($post, $rows);
+    }
+
+    public function test_novapay_register39_requires_permission(): void
+    {
+        [, $post, $rows] = $this->novapayRegister39Source();
+        $this->actor(999);
+        $this->expectException(AuthorizationException::class);
+        app(CheckoutCodNovaPayRegisterService::class)->capture(
+            $post['operation_key'], (string) Str::uuid(), str_repeat('b', 64), $rows
+        );
+    }
+
+    public function test_novapay_register39_bank_poster_cannot_capture(): void
+    {
+        [, $post, $rows] = $this->novapayRegister39Source();
+        Gate::define(CheckoutCodNovaPayRegisterService::CAPTURE_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 3801);
+        $this->actor(3801);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodNovaPayRegisterService::class)->capture(
+            $post['operation_key'], (string) Str::uuid(), str_repeat('b', 64), $rows
+        );
+    }
+
+    public function test_novapay_register39_source_references_are_not_stored_raw(): void
+    {
+        [, $post, $rows] = $this->novapayRegister39Source();
+        $this->novapayRegister39Capture($post, $rows);
+        $dbRow = DB::table('checkout_cod_novapay_register_lines')->first();
+        $text = json_encode($dbRow, JSON_THROW_ON_ERROR);
+        $this->assertStringNotContainsString($rows[0]['external_payment_ref'], $text);
+        $this->assertStringNotContainsString($rows[0]['shipment_number'], $text);
+        $this->assertMatchesRegularExpression('/^[a-f0-9]{64}$/D', $dbRow->external_payment_hmac);
+    }
+
+    public function test_novapay_register39_lines_cannot_be_modified(): void
+    {
+        [, $post, $rows] = $this->novapayRegister39Source();
+        $this->novapayRegister39Capture($post, $rows);
+        $this->expectException(QueryException::class);
+        DB::table('checkout_cod_novapay_register_lines')->update(['net_minor' => 1]);
+    }
+
+    public function test_novapay_register39_reader_permission_required(): void
+    {
+        [, $post] = $this->novapayRegister39Source();
+        $this->actor(999);
+        $this->expectException(AuthorizationException::class);
+        app(CheckoutCodNovaPayRegisterStatusService::class)
+            ->inspect($post['operation_key']);
+    }
+
+    public function test_novapay_register39_posting_without_all_lines_is_rejected_at_commit(): void
+    {
+        [, $post] = $this->novapayRegister39Source();
+        $this->expectException(QueryException::class);
+        DB::transaction(static function () use ($post): void {
+            DB::table('checkout_cod_novapay_register_captures')->insert([
+                'operation_key' => (string) Str::uuid(),
+                'bank_posting_id' => $post['posting_id'],
+                'source_kind' => 'operator_extract',
+                'document_sha256' => str_repeat('b', 64),
+                'orders_count' => 1,
+                'gross_minor' => 2000,
+                'fee_minor' => 1320,
+                'bank_minor' => 680,
+                'snapshot_hmac' => str_repeat('c', 64),
+                'captured_by' => 3901,
+                'request_hmac' => str_repeat('d', 64),
+                'created_at' => now(),
+            ]);
+            DB::statement('SET CONSTRAINTS cod_npr_complete_at_commit IMMEDIATE');
+        });
+    }
+
+    // ============================================================
+    // BLOCK 40 — CANONICAL CSV UPLOAD FOR NOVAPAY REGISTER CLAIMS
+    // ============================================================
+
+    private function novapayCsv40Bytes(array $rows, string $eol = "\n"): string
+    {
+        $columns = CheckoutCodNovaPayRegisterCsvParser::HEADERS;
+        $lines = [implode(',', $columns)];
+
+        foreach ($rows as $r) {
+            $fields = [];
+            foreach ($columns as $column) {
+                $fields[] = (string) $r[$column];
+            }
+            $lines[] = implode(',', $fields);
+        }
+
+        return implode($eol, $lines) . $eol;
+    }
+
+    private function novapayCsv40Import(
+        array $posting,
+        string $bytes,
+        ?string $key = null
+    ): array {
+        $this->actor(3901);
+
+        return app(CheckoutCodNovaPayRegisterCsvImportService::class)->import(
+            $posting['operation_key'],
+            $key ?? (string) Str::uuid(),
+            $bytes
+        );
+    }
+
+    public function test_novapay_csv40_single_bank_register_import_succeeds_without_paid(): void
+    {
+        [, $posting, $rows] = $this->novapayRegister39Source();
+        $bytes = $this->novapayCsv40Bytes($rows);
+
+        $r = $this->novapayCsv40Import($posting, $bytes);
+
+        $this->assertSame(1, $r['imported_rows_count']);
+        $this->assertSame(hash('sha256', $bytes), $r['document_sha256']);
+        $this->assertSame('boardriders_canonical_csv_v1', $r['input_format']);
+        $this->assertFalse($r['novapay_origin_authenticated']);
+        $this->assertFalse($r['cod_paid']);
+
+        $this->assertDatabaseHas('checkout_cod_novapay_register_captures', [
+            'id' => $r['capture_id'],
+            'document_sha256' => hash('sha256', $bytes),
+        ]);
+
+        $this->assertSame('pending', DB::table('orders')
+            ->where('order_key', $this->orderKey)->value('payment_status'));
+    }
+
+    public function test_novapay_csv40_multiorder_bank_batch_imports_all_lines(): void
+    {
+        [, $posting, $rows] = $this->novapayRegister39Source(true);
+
+        $r = $this->novapayCsv40Import(
+            $posting,
+            $this->novapayCsv40Bytes($rows)
+        );
+
+        $this->assertSame(2, $r['imported_rows_count']);
+        $this->assertSame(1360, $r['bank_minor']);
+        $this->assertDatabaseCount('checkout_cod_novapay_register_lines', 2);
+        $this->assertDatabaseCount('checkout_cod_bank_receipt_postings', 1);
+    }
+
+    public function test_novapay_csv40_same_file_and_uuid_are_idempotent(): void
+    {
+        [, $posting, $rows] = $this->novapayRegister39Source();
+        $bytes = $this->novapayCsv40Bytes($rows);
+        $key = (string) Str::uuid();
+
+        $first = $this->novapayCsv40Import($posting, $bytes, $key);
+        $second = $this->novapayCsv40Import($posting, $bytes, $key);
+
+        $this->assertSame($first['capture_id'], $second['capture_id']);
+        $this->assertTrue($second['idempotent_replay']);
+        $this->assertDatabaseCount('checkout_cod_novapay_register_captures', 1);
+    }
+
+    public function test_novapay_csv40_same_uuid_different_bytes_are_rejected(): void
+    {
+        [, $posting, $rows] = $this->novapayRegister39Source();
+        $bytes = $this->novapayCsv40Bytes($rows);
+        $key = (string) Str::uuid();
+
+        $this->novapayCsv40Import($posting, $bytes, $key);
+
+        $this->expectException(DomainException::class);
+
+        $this->novapayCsv40Import(
+            $posting,
+            "\xEF\xBB\xBF" . $bytes,
+            $key
+        );
+    }
+
+    public function test_novapay_csv40_amount_mismatch_creates_no_capture(): void
+    {
+        [, $posting, $rows] = $this->novapayRegister39Source();
+        $rows[0]['net_minor']++;
+
+        $this->expectException(InvalidArgumentException::class);
+
+        try {
+            $this->novapayCsv40Import(
+                $posting,
+                $this->novapayCsv40Bytes($rows)
+            );
+        } finally {
+            $this->assertDatabaseCount('checkout_cod_novapay_register_captures', 0);
+        }
+    }
+
+    public function test_novapay_csv40_duplicate_payment_ref_creates_no_capture(): void
+    {
+        [, $posting, $rows] = $this->novapayRegister39Source(true);
+
+        $rows[1]['external_payment_ref'] = $rows[0]['external_payment_ref'];
+
+        $this->expectException(InvalidArgumentException::class);
+
+        $this->novapayCsv40Import(
+            $posting,
+            $this->novapayCsv40Bytes($rows)
+        );
+    }
+
+    public function test_novapay_csv40_missing_order_cannot_commit_batch(): void
+    {
+        [, $posting, $rows] = $this->novapayRegister39Source(true);
+        array_pop($rows);
+
+        $this->expectException(InvalidArgumentException::class);
+
+        $this->novapayCsv40Import(
+            $posting,
+            $this->novapayCsv40Bytes($rows)
+        );
+    }
+
+    public function test_novapay_csv40_authorization_precedes_file_parsing(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $this->actor(999);
+
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodNovaPayRegisterCsvImportService::class)->import(
+            $posting['operation_key'],
+            (string) Str::uuid(),
+            "\0not-a-csv"
+        );
+    }
+
+    public function test_novapay_csv40_later_negative_bank_read_blocks_import(): void
+    {
+        [$source, $posting, $rows] = $this->novapayRegister39Source();
+
+        $this->refetchRisk37Negative('single', $source);
+
+        $this->expectException(DomainException::class);
+
+        $this->novapayCsv40Import(
+            $posting,
+            $this->novapayCsv40Bytes($rows)
+        );
+    }
+
+    public function test_novapay_csv40_route_requires_sanctum_auth(): void
+    {
+        $route = \Illuminate\Support\Facades\Route::getRoutes()
+            ->getByName('cod.novapay.register.csv-import');
+
+        $this->assertNotNull($route);
+        $this->assertContains('auth:sanctum', $route->gatherMiddleware());
+        $this->assertContains('throttle:5,1', $route->gatherMiddleware());
+    }
+
+    public function test_novapay_csv40_http_upload_success(): void
+    {
+        [, $posting, $rows] = $this->novapayRegister39Source();
+        $bytes = $this->novapayCsv40Bytes($rows);
+
+        $this->actingAs(new GenericUser(['id' => 3901]), 'sanctum');
+
+        $response = $this->post(
+            '/api/v1/admin/cod/novapay/register/csv-import',
+            [
+                'posting_key' => $posting['operation_key'],
+                'operation_key' => (string) Str::uuid(),
+                'file' => UploadedFile::fake()
+                    ->createWithContent('register.csv', $bytes),
+            ],
+            ['Accept' => 'application/json']
+        );
+
+        $response->assertStatus(201)
+            ->assertJsonPath('document_sha256', hash('sha256', $bytes))
+            ->assertJsonPath('novapay_origin_authenticated', false)
+            ->assertJsonPath('cod_paid', false);
+
+        $this->assertDatabaseCount('checkout_cod_novapay_register_lines', 1);
+    }
+
+    public function test_novapay_csv40_http_invalid_csv_is_422(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $this->actingAs(new GenericUser(['id' => 3901]), 'sanctum');
+
+        $this->post(
+            '/api/v1/admin/cod/novapay/register/csv-import',
+            [
+                'posting_key' => $posting['operation_key'],
+                'operation_key' => (string) Str::uuid(),
+                'file' => UploadedFile::fake()
+                    ->createWithContent('bad.csv', 'bad,data'),
+            ],
+            ['Accept' => 'application/json']
+        )->assertStatus(422);
+
+        $this->assertDatabaseCount('checkout_cod_novapay_register_captures', 0);
+    }
+
+    public function test_novapay_csv40_http_operator_without_permission_is_403(): void
+    {
+        [, $posting, $rows] = $this->novapayRegister39Source();
+
+        $this->actingAs(new GenericUser(['id' => 999]), 'sanctum');
+
+        $this->post(
+            '/api/v1/admin/cod/novapay/register/csv-import',
+            [
+                'posting_key' => $posting['operation_key'],
+                'operation_key' => (string) Str::uuid(),
+                'file' => UploadedFile::fake()->createWithContent(
+                    'register.csv',
+                    $this->novapayCsv40Bytes($rows)
+                ),
+            ],
+            ['Accept' => 'application/json']
+        )->assertStatus(403);
     }
 
 }
