@@ -96,3 +96,38 @@ Route::post(
 )
     ->middleware(['auth:sanctum', 'throttle:5,1'])
     ->name('cod.novapay.register.csv-import');
+
+
+// ============================================================
+// BOARDRIDERS BLOCK 41 — COD FINANCIAL OPERATIONS
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])->group(function (): void {
+
+    \Illuminate\Support\Facades\Route::get(
+        '/v1/admin/cod/operations',
+        [
+            \App\Http\Controllers\Api\CheckoutCodOperationsController::class,
+            'index',
+        ]
+    )->middleware('throttle:30,1');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/v1/admin/cod/operations/{postingKey}',
+        [
+            \App\Http\Controllers\Api\CheckoutCodOperationsController::class,
+            'show',
+        ]
+    )->middleware('throttle:30,1');
+
+    \Illuminate\Support\Facades\Route::post(
+        '/v1/admin/cod/operations/{postingKey}/reviews',
+        [
+            \App\Http\Controllers\Api\CheckoutCodOperationsController::class,
+            'review',
+        ]
+    )->middleware('throttle:10,1');
+
+});

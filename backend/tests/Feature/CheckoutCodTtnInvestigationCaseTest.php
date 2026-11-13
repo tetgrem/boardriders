@@ -6,7 +6,8 @@ use App\Services\Pricing\CheckoutCodNovaPayRegisterService;
 use App\Services\Pricing\CheckoutCodNovaPayRegisterStatusService;
 use App\Services\Pricing\CheckoutCodPrivatRefetchService;
 use App\Services\Pricing\CheckoutCodPrivatRefetchStatusService;
-
+use App\Services\Pricing\CheckoutCodOperationsService;
+use App\Services\Pricing\CheckoutCodOperationsReviewService;
 use App\Services\Pricing\CheckoutCodNovaPayRegisterCsvParser;
 use App\Services\Pricing\CheckoutCodNovaPayRegisterCsvImportService;
 use Illuminate\Http\UploadedFile;
@@ -9375,5 +9376,467 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
             ['Accept' => 'application/json']
         )->assertStatus(403);
     }
+    // ============================================================
+    // BLOCK 41 — COD OPERATIONS / NOVAPAY CRM REVIEW QUEUE
+    // ============================================================
 
+    private function operations41Reviewer(): void
+    {
+        Gate::define(
+            CheckoutCodOperationsReviewService::REVIEW_ABILITY,
+            static fn ($u): bool =>
+                (int) $u->getAuthIdentifier() === 1200
+        );
+
+        $this->actor(1200);
+    }
+
+    public function test_cod_operations41_bank_posting_without_register_is_in_queue(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $this->actor(1200);
+
+        $service = app(CheckoutCodOperationsService::class);
+
+        $state = $service->inspect($posting['operation_key']);
+
+        $this->assertSame(
+            'awaiting_register',
+            $state['status']
+        );
+
+        $this->assertContains(
+            'register_missing',
+            $state['flags']
+        );
+
+        $this->assertFalse($state['cod_paid']);
+
+        $this->assertFalse(
+            $state['automatic_payment_posting_allowed']
+        );
+
+        $queue = $service->queue(
+            null,
+            10,
+            'awaiting_register'
+        );
+
+        $this->assertCount(1, $queue['items']);
+
+        $this->assertSame(
+            $posting['operation_key'],
+            $queue['items'][0]['posting_key']
+        );
+    }
+
+    public function test_cod_operations41_register_matches_amounts_but_not_external_origin(): void
+    {
+        [, $posting, $rows] = $this->novapayRegister39Source();
+
+        $this->novapayRegister39Capture($posting, $rows);
+
+        $this->actor(1200);
+
+        $state = app(CheckoutCodOperationsService::class)
+            ->inspect($posting['operation_key']);
+
+        $this->assertSame(2000, $state['gross_minor']);
+        $this->assertSame(1320, $state['fee_minor']);
+        $this->assertSame(680, $state['bank_minor']);
+
+        $this->assertTrue(
+            $state['facts']['register_balanced']
+        );
+
+        $this->assertTrue(
+            $state['facts']['bank_balanced']
+        );
+
+        $this->assertFalse(
+            $state['novapay_origin_authenticated']
+        );
+
+        $this->assertFalse(
+            $state['ttn_matches_register_verified']
+        );
+
+        $this->assertFalse($state['cod_paid']);
+
+        $this->assertSame(
+            'pending',
+            DB::table('orders')
+                ->where('order_key', $this->orderKey)
+                ->value('payment_status')
+        );
+    }
+
+    public function test_cod_operations41_batch_is_reconciled_by_each_order(): void
+    {
+        [, $posting, $rows] = $this->novapayRegister39Source(true);
+
+        $this->novapayRegister39Capture($posting, $rows);
+
+        $this->actor(1200);
+
+        $state = app(CheckoutCodOperationsService::class)
+            ->inspect($posting['operation_key']);
+
+        $this->assertCount(2, $state['lines']);
+
+        $this->assertSame(4000, $state['gross_minor']);
+        $this->assertSame(2640, $state['fee_minor']);
+        $this->assertSame(1360, $state['bank_minor']);
+
+        $this->assertTrue(
+            $state['facts']['register_balanced']
+        );
+
+        foreach ($state['lines'] as $line) {
+            $this->assertTrue(
+                $line['register_amounts_match']
+            );
+
+            $this->assertFalse(
+                $line['ttn_matches_register_verified']
+            );
+        }
+    }
+
+    public function test_cod_operations41_later_refetch_anomaly_escalates_current_case(): void
+    {
+        [$source, $posting, $rows] =
+            $this->novapayRegister39Source();
+
+        $this->novapayRegister39Capture($posting, $rows);
+
+        $this->actor(1200);
+
+        $service = app(CheckoutCodOperationsService::class);
+
+        $before = $service->inspect($posting['operation_key']);
+
+        $this->refetchRisk37Negative('single', $source);
+
+// Возвращаем пользователя с правом просмотра COD.
+        $this->actor(1200);
+
+        $after = $service->inspect($posting['operation_key']);
+
+        $this->assertSame(
+            'investigation_required',
+            $after['status']
+        );
+
+        $this->assertContains(
+            'refetch_anomaly',
+            $after['flags']
+        );
+
+        $this->assertNotSame(
+            $before['snapshot_hmac'],
+            $after['snapshot_hmac']
+        );
+    }
+
+    public function test_cod_operations41_review_is_append_only_and_does_not_mark_paid(): void
+    {
+        [, $posting, $rows] = $this->novapayRegister39Source();
+
+        $this->novapayRegister39Capture($posting, $rows);
+
+        $this->operations41Reviewer();
+
+        $service = app(CheckoutCodOperationsService::class);
+
+        $snapshot = $service
+            ->inspect($posting['operation_key'])['snapshot_hmac'];
+
+        $review = app(
+            CheckoutCodOperationsReviewService::class
+        )->record(
+            $posting['operation_key'],
+            (string) Str::uuid(),
+            $snapshot,
+            'request_evidence',
+            'source_proof_needed'
+        );
+
+        $this->assertFalse($review['cod_paid']);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_operations_reviews',
+            1
+        );
+
+        $current = $service->inspect(
+            $posting['operation_key']
+        );
+
+        $this->assertSame(
+            'request_evidence',
+            $current['latest_review']['action']
+        );
+
+        $this->assertTrue(
+            $current['latest_review']['snapshot_current']
+        );
+
+        $this->assertSame(
+            'pending',
+            DB::table('orders')
+                ->where('order_key', $this->orderKey)
+                ->value('payment_status')
+        );
+    }
+
+    public function test_cod_operations41_same_review_request_is_idempotent(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $this->operations41Reviewer();
+
+        $snapshot = app(CheckoutCodOperationsService::class)
+            ->inspect($posting['operation_key'])['snapshot_hmac'];
+
+        $key = (string) Str::uuid();
+
+        $service = app(
+            CheckoutCodOperationsReviewService::class
+        );
+
+        $first = $service->record(
+            $posting['operation_key'],
+            $key,
+            $snapshot,
+            'request_evidence',
+            'source_proof_needed'
+        );
+
+        $again = $service->record(
+            $posting['operation_key'],
+            $key,
+            $snapshot,
+            'request_evidence',
+            'source_proof_needed'
+        );
+
+        $this->assertSame(
+            $first['review_id'],
+            $again['review_id']
+        );
+
+        $this->assertTrue($again['idempotent_replay']);
+
+        $this->assertDatabaseCount(
+            'checkout_cod_operations_reviews',
+            1
+        );
+    }
+
+    public function test_cod_operations41_changed_replay_is_rejected(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $this->operations41Reviewer();
+
+        $snapshot = app(CheckoutCodOperationsService::class)
+            ->inspect($posting['operation_key'])['snapshot_hmac'];
+
+        $key = (string) Str::uuid();
+
+        $service = app(
+            CheckoutCodOperationsReviewService::class
+        );
+
+        $service->record(
+            $posting['operation_key'],
+            $key,
+            $snapshot,
+            'request_evidence',
+            'source_proof_needed'
+        );
+
+        $this->expectException(DomainException::class);
+
+        $service->record(
+            $posting['operation_key'],
+            $key,
+            $snapshot,
+            'request_evidence',
+            'shipment_proof_needed'
+        );
+    }
+
+    public function test_cod_operations41_stale_snapshot_cannot_be_reviewed(): void
+    {
+        [$source, $posting] = $this->novapayRegister39Source();
+
+        $this->operations41Reviewer();
+
+        $snapshot = app(CheckoutCodOperationsService::class)
+            ->inspect($posting['operation_key'])['snapshot_hmac'];
+
+        $this->refetchRisk37Negative('single', $source);
+
+
+        $this->operations41Reviewer();
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodOperationsReviewService::class)->record(
+            $posting['operation_key'],
+            (string) Str::uuid(),
+            $snapshot,
+            'escalate_investigation',
+            'manual_recheck'
+        );
+    }
+
+    public function test_cod_operations41_unverified_comparison_cannot_be_acknowledged_as_clean(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $this->operations41Reviewer();
+
+        $snapshot = app(CheckoutCodOperationsService::class)
+            ->inspect($posting['operation_key'])['snapshot_hmac'];
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodOperationsReviewService::class)->record(
+            $posting['operation_key'],
+            (string) Str::uuid(),
+            $snapshot,
+            'acknowledge_comparison',
+            'allocation_checked'
+        );
+    }
+
+    public function test_cod_operations41_poster_cannot_review_even_with_permission(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        Gate::define(
+            CheckoutCodOperationsReviewService::REVIEW_ABILITY,
+            static fn ($u): bool =>
+                (int) $u->getAuthIdentifier() === 3801
+        );
+
+        Gate::define(
+            CheckoutCodTtnInvestigationStatusService::VIEW_ABILITY,
+            static fn ($u): bool =>
+                (int) $u->getAuthIdentifier() === 3801
+        );
+
+        $this->actor(3801);
+
+        $snapshot = app(CheckoutCodOperationsService::class)
+            ->inspect($posting['operation_key'])['snapshot_hmac'];
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodOperationsReviewService::class)->record(
+            $posting['operation_key'],
+            (string) Str::uuid(),
+            $snapshot,
+            'request_evidence',
+            'manual_recheck'
+        );
+    }
+
+    public function test_cod_operations41_register_capturer_cannot_review(): void
+    {
+        [, $posting, $rows] = $this->novapayRegister39Source();
+
+        $this->novapayRegister39Capture($posting, $rows);
+
+        Gate::define(
+            CheckoutCodOperationsReviewService::REVIEW_ABILITY,
+            static fn ($u): bool =>
+                (int) $u->getAuthIdentifier() === 3901
+        );
+
+        Gate::define(
+            CheckoutCodTtnInvestigationStatusService::VIEW_ABILITY,
+            static fn ($u): bool =>
+                (int) $u->getAuthIdentifier() === 3901
+        );
+
+        $this->actor(3901);
+
+        $snapshot = app(CheckoutCodOperationsService::class)
+            ->inspect($posting['operation_key'])['snapshot_hmac'];
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodOperationsReviewService::class)->record(
+            $posting['operation_key'],
+            (string) Str::uuid(),
+            $snapshot,
+            'request_evidence',
+            'manual_recheck'
+        );
+    }
+
+    public function test_cod_operations41_review_history_cannot_be_updated(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $this->operations41Reviewer();
+
+        $snapshot = app(CheckoutCodOperationsService::class)
+            ->inspect($posting['operation_key'])['snapshot_hmac'];
+
+        app(CheckoutCodOperationsReviewService::class)->record(
+            $posting['operation_key'],
+            (string) Str::uuid(),
+            $snapshot,
+            'request_evidence',
+            'manual_recheck'
+        );
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_operations_reviews')->update([
+            'reason_code' => 'source_proof_needed',
+        ]);
+    }
+
+    public function test_cod_operations41_reader_requires_permission(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $this->actor(999);
+
+        $this->expectException(
+            AuthorizationException::class
+        );
+
+        app(CheckoutCodOperationsService::class)
+            ->inspect($posting['operation_key']);
+    }
+
+    public function test_cod_operations41_reviewer_requires_separate_permission(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+
+        $this->actor(1200);
+
+        $snapshot = app(CheckoutCodOperationsService::class)
+            ->inspect($posting['operation_key'])['snapshot_hmac'];
+
+        $this->expectException(
+            AuthorizationException::class
+        );
+
+        app(CheckoutCodOperationsReviewService::class)->record(
+            $posting['operation_key'],
+            (string) Str::uuid(),
+            $snapshot,
+            'request_evidence',
+            'manual_recheck'
+        );
+    }
 }
