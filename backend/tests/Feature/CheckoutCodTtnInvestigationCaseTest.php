@@ -21,7 +21,7 @@ use App\Services\Pricing\CheckoutCodCaseAlertService;
 use App\Services\Pricing\CheckoutCodCaseAlertInboxService;
 use Illuminate\Support\Facades\Queue;
 use App\Services\Pricing\CheckoutCodRefetchRiskStatusService;
-
+use App\Services\Pricing\CheckoutCodAnalyticsService;
 use App\Services\Pricing\CheckoutCodAdjustmentPlanService;
 
 use App\Services\Pricing\CheckoutCodBankCoverageService;
@@ -10894,5 +10894,225 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
         app(
             CheckoutCodCaseAlertInboxService::class
         )->listing('mine');
+    }
+    // ============================================================
+    // BLOCK 44 — MANAGEMENT ANALYTICS: FINANCE, SLA, STAFF, ALERTS
+    // ============================================================
+
+    private function codAnalytics44Gate(): void
+    {
+        Gate::define(
+            CheckoutCodTtnInvestigationStatusService::VIEW_ABILITY,
+            static fn ($u): bool => in_array(
+                (int) $u->getAuthIdentifier(), [1200, 1201], true
+            )
+        );
+        Gate::define(
+            CheckoutCodAnalyticsService::VIEW_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 1200
+        );
+        $this->actor(1200);
+    }
+
+    private function codAnalytics44Report(?string $from = null, ?string $to = null): array
+    {
+        $this->codAnalytics44Gate();
+        return app(CheckoutCodAnalyticsService::class)->report($from, $to);
+    }
+
+    public function test_cod_analytics44_empty_period_has_zero_values_not_fake_percentages(): void
+    {
+        $today = CarbonImmutable::now('UTC')->toDateString();
+        $r = $this->codAnalytics44Report($today, $today);
+        $this->assertSame(0, $r['financial']['postings_count']);
+        $this->assertSame(0, $r['cases']['created_count']);
+        $this->assertNull($r['financial']['register_coverage_bp']);
+        $this->assertNull($r['cases']['closed_sla_hit_rate_bp']);
+        $this->assertSame(0, $r['notifications']['outbox_created_count']);
+        $this->assertCount(1, $r['daily']);
+        $this->assertFalse($r['cod_paid']);
+    }
+
+    public function test_cod_analytics44_bank_posting_counts_money_without_customer_paid(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+        $date = CarbonImmutable::now('UTC')->toDateString();
+        $r = $this->codAnalytics44Report($date, $date);
+        $this->assertSame(1, $r['financial']['postings_count']);
+        $this->assertSame(680, $r['financial']['posted_bank_minor']);
+        $this->assertSame(2000, $r['financial']['journal_gross_minor']);
+        $this->assertSame(1320, $r['financial']['journal_fee_minor']);
+        $this->assertSame(1, $r['financial']['missing_register_count']);
+        $this->assertSame(0, $r['financial']['register_coverage_bp']);
+        $this->assertNull($r['financial']['customer_paid_minor_verified']);
+        $this->assertSame(1, $r['daily'][0]['postings_count']);
+        $this->assertSame(680, $r['daily'][0]['posted_bank_minor']);
+        $this->assertFalse($r['automatic_payment_posting_allowed']);
+    }
+
+    public function test_cod_analytics44_registry_is_a_claim_not_revenue(): void
+    {
+        [, $posting, $rows] = $this->novapayRegister39Source();
+        $this->novapayRegister39Capture($posting, $rows);
+        $date = CarbonImmutable::now('UTC')->toDateString();
+        $r = $this->codAnalytics44Report($date, $date);
+        $this->assertSame(1, $r['financial']['register_claims_count']);
+        $this->assertSame(0, $r['financial']['missing_register_count']);
+        $this->assertSame(10000, $r['financial']['register_coverage_bp']);
+        $this->assertSame(2000, $r['financial']['claimed_register_gross_minor']);
+        $this->assertSame(1320, $r['financial']['claimed_register_fee_minor']);
+        $this->assertSame(680, $r['financial']['claimed_register_net_minor']);
+        $this->assertSame(0, $r['financial']['register_amount_mismatch_count']);
+        $this->assertNull($r['financial']['revenue_minor_verified']);
+    }
+
+    public function test_cod_analytics44_case_cohort_counts_open_and_unassigned(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+        $case = $this->codCase42Open($posting);
+        $date = CarbonImmutable::now('UTC')->toDateString();
+        $r = $this->codAnalytics44Report($date, $date);
+        $this->assertSame(1, $r['cases']['created_count']);
+        $this->assertSame(1, $r['cases']['open_count']);
+        $this->assertSame(0, $r['cases']['currently_assigned_count']);
+        $this->assertSame([], $r['staff']['items']);
+        $this->assertSame(1, $r['daily'][0]['cases_created_count']);
+        $this->assertSame('open', $case['case_status']);
+    }
+
+    public function test_cod_analytics44_employee_load_is_based_on_current_assignee(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+        $case = $this->codCase42Open($posting);
+        $this->codCase42Action($case, 'claim', 'start_work');
+        $date = CarbonImmutable::now('UTC')->toDateString();
+        $r = $this->codAnalytics44Report($date, $date);
+        $this->assertSame(1, $r['cases']['in_progress_count']);
+        $this->assertSame(1, $r['cases']['currently_assigned_count']);
+        $this->assertSame(1200, $r['staff']['items'][0]['actor_id']);
+        $this->assertSame(1, $r['staff']['items'][0]['active_cases_count']);
+        $this->assertSame(0, $r['staff']['items'][0]['closed_cases_count']);
+        $this->assertNull($r['staff']['items'][0]['closed_sla_hit_rate_bp']);
+        $this->assertFalse($r['staff']['truncated']);
+    }
+
+    public function test_cod_analytics44_open_overdue_is_evaluated_at_report_time(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+        $case = $this->codCase42Open($posting);
+        $originalDay = CarbonImmutable::now('UTC')->toDateString();
+        CarbonImmutable::setTestNow(
+            CarbonImmutable::parse($case['sla_due_at'])->addMinute()
+        );
+        $r = $this->codAnalytics44Report($originalDay, $originalDay);
+        $this->assertSame(1, $r['cases']['active_overdue_count']);
+        $this->assertSame(0, $r['cases']['closed_internal_review_count']);
+        $this->assertFalse($r['cases']['live_evidence_freshness_checked']);
+    }
+
+    public function test_cod_analytics44_daily_series_fills_empty_days(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+        $today = CarbonImmutable::now('UTC');
+        $r = $this->codAnalytics44Report(
+            $today->subDay()->toDateString(),
+            $today->addDay()->toDateString()
+        );
+        $this->assertCount(3, $r['daily']);
+        $this->assertSame(0, $r['daily'][0]['postings_count']);
+        $this->assertSame(1, $r['daily'][1]['postings_count']);
+        $this->assertSame(0, $r['daily'][2]['postings_count']);
+    }
+    public function test_cod_analytics44_alert_outbox_shows_pending_status(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+        $case = $this->codCase42Open($posting);
+        $from = CarbonImmutable::now('UTC')->toDateString();
+        CarbonImmutable::setTestNow(
+            CarbonImmutable::parse($case['sla_due_at'])->addMinutes(30)
+        );
+        app(CheckoutCodCaseAlertService::class)->scan();
+        $to = CarbonImmutable::now('UTC')->toDateString();
+        $r = $this->codAnalytics44Report($from, $to);
+        $this->assertSame(2, $r['notifications']['outbox_created_count']);
+        $this->assertSame(2, $r['notifications']['outbox_pending_count']);
+        $this->assertSame(1, $r['notifications']['by_kind']['unassigned_30m']);
+        $this->assertSame(1, $r['notifications']['by_kind']['overdue']);
+        $this->assertSame(0, $r['notifications']['crm_delivery_rate_bp']);
+    }
+
+    public function test_cod_analytics44_crm_delivery_and_read_receipts_are_separate(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+        $case = $this->codCase42Open($posting);
+        $from = CarbonImmutable::now('UTC')->toDateString();
+        CarbonImmutable::setTestNow(
+            CarbonImmutable::parse($case['sla_due_at'])->addMinutes(30)
+        );
+        app(CheckoutCodCaseAlertService::class)->scan();
+        $outboxId = (int) DB::table('checkout_cod_case_alert_outbox')
+            ->where('alert_kind', 'overdue')->value('id');
+        (new DeliverCheckoutCodCaseAlert($outboxId))->handle(
+            app(CheckoutCodCaseAlertPolicy::class)
+        );
+        $this->codAlert43Gate();
+        $this->actor(1201);
+        $noticeId = (int) DB::table('checkout_cod_case_alert_inbox')->value('id');
+        app(CheckoutCodCaseAlertInboxService::class)->acknowledge($noticeId);
+        $to = CarbonImmutable::now('UTC')->toDateString();
+        $r = $this->codAnalytics44Report($from, $to);
+        $this->assertSame(1, $r['notifications']['outbox_delivered_count']);
+        $this->assertSame(1, $r['notifications']['outbox_pending_count']);
+        $this->assertSame(5000, $r['notifications']['crm_delivery_rate_bp']);
+        $this->assertSame(1, $r['notifications']['crm_inbox_items_created_count']);
+        $this->assertSame(1, $r['notifications']['crm_inbox_read_count']);
+        $this->assertFalse($r['notifications']['external_channels_delivered_verified']);
+    }
+
+    public function test_cod_analytics44_outside_requested_period_is_excluded(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+        $far = CarbonImmutable::now('UTC')->addDays(5)->toDateString();
+        $r = $this->codAnalytics44Report($far, $far);
+        $this->assertSame(0, $r['financial']['postings_count']);
+        $this->assertSame(0, $r['daily'][0]['posted_bank_minor']);
+    }
+
+    public function test_cod_analytics44_requires_extra_finance_analytics_permission(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+        $this->actor(1200); // COD viewer, but no special analytics right.
+        $this->expectException(AuthorizationException::class);
+        app(CheckoutCodAnalyticsService::class)->report();
+    }
+
+    public function test_cod_analytics44_rejects_reversed_dates(): void
+    {
+        $this->codAnalytics44Gate();
+        $this->expectException(InvalidArgumentException::class);
+        app(CheckoutCodAnalyticsService::class)->report('2026-11-14', '2026-11-13');
+    }
+
+    public function test_cod_analytics44_is_read_only_for_payment_and_case_tables(): void
+    {
+        [, $posting] = $this->novapayRegister39Source();
+        $case = $this->codCase42Open($posting);
+        $before = (int) DB::table('checkout_cod_operations_case_events')->count();
+        $day = CarbonImmutable::now('UTC')->toDateString();
+        $r = $this->codAnalytics44Report($day, $day);
+        $this->assertSame($before,
+            (int) DB::table('checkout_cod_operations_case_events')->count());
+        $this->assertSame('pending', DB::table('orders')
+            ->where('order_key', $this->orderKey)->value('payment_status'));
+        $this->assertFalse($r['orders_payment_status_changed']);
+        $this->assertSame($case['case_id'],
+            (int) DB::table('checkout_cod_operations_cases')->value('id'));
+    }
+
+    public function test_cod_analytics44_named_api_route_is_registered(): void
+    {
+        $this->assertTrue(
+            \Illuminate\Support\Facades\Route::has('cod.analytics.dashboard')
+        );
     }
 }

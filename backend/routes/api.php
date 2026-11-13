@@ -208,3 +208,18 @@ Route::post(
     )->whereNumber('notificationId')
         ->middleware('throttle:20,1');
 });
+
+
+// ============================================================
+// BOARDRIDERS BLOCK 44 — COD MANAGEMENT ANALYTICS
+// ============================================================
+
+\Illuminate\Support\Facades\Route::get(
+    '/v1/admin/cod/analytics',
+    \App\Http\Controllers\Api\CheckoutCodAnalyticsController::class
+)
+    ->middleware([
+        'auth:sanctum',
+        'throttle:20,1',
+    ])
+    ->name('cod.analytics.dashboard');
