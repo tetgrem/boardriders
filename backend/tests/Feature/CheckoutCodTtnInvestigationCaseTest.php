@@ -2,6 +2,8 @@
 
 namespace Tests\Feature;
 
+use App\Services\Pricing\CheckoutCodDailyMonitorService;
+use App\Services\Pricing\CheckoutCodDailyCorrectionService;
 use App\Services\Pricing\CheckoutCodDailyReportService;
 use App\Services\Pricing\CheckoutCodNovaPayRegisterService;
 use App\Services\Pricing\CheckoutCodNovaPayRegisterStatusService;
@@ -11174,6 +11176,7 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
         return [
             'day' => $day,
             'post' => $post,
+            'rows' => $rows,
             'case' => $case,
         ];
     }
@@ -11546,6 +11549,715 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
                      'cod.daily45.verify',
                      'cod.daily45.events',
                      'cod.daily45.csv',
+                 ] as $name) {
+            $this->assertTrue(
+                \Illuminate\Support\Facades\Route::has($name)
+            );
+        }
+    }
+    // ============================================================
+    // BLOCK 46 — IMMUTABLE FINANCIAL CORRECTION APPENDICES
+    // ============================================================
+
+    private function codCorrection46Gate(): void
+    {
+        $allowed = static fn ($u): bool => in_array(
+            (int) $u->getAuthIdentifier(), [1200, 1201, 1202, 1203, 1204], true
+        );
+        Gate::define(CheckoutCodTtnInvestigationStatusService::VIEW_ABILITY, $allowed);
+        Gate::define(CheckoutCodAnalyticsService::VIEW_ABILITY, $allowed);
+        Gate::define(CheckoutCodDailyReportService::VIEW_ABILITY, $allowed);
+        Gate::define(CheckoutCodDailyCorrectionService::VIEW_ABILITY, $allowed);
+        Gate::define(CheckoutCodDailyCorrectionService::PROPOSE_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 1201);
+        Gate::define(CheckoutCodDailyCorrectionService::REVIEW_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 1202);
+        Gate::define(CheckoutCodDailyCorrectionService::PUBLISH_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 1203);
+        Gate::define(CheckoutCodDailyCorrectionService::EXPORT_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 1204);
+    }
+
+    private function codCorrection46Fixture(bool $lateRegister = true): array
+    {
+        $f = $this->codDaily45Fixture();
+        $sealed = $this->codDaily45Seal($f['day']);
+        CarbonImmutable::setTestNow(CarbonImmutable::now('UTC')->addMinute());
+        if ($lateRegister) {
+            $this->novapayRegister39Capture($f['post'], $f['rows']);
+        }
+        $this->codCorrection46Gate();
+        $this->actor(1201);
+        return ['report' => $sealed, 'posting' => $f['post']];
+    }
+
+    private function codCorrection46Propose(array $fixture, ?string $op = null, string $reason = 'late_register'): array
+    {
+        return app(CheckoutCodDailyCorrectionService::class)->propose(
+            $fixture['report']['report_key'], $op ?? (string) Str::uuid(), $reason
+        );
+    }
+
+    private function codCorrection46Action(array $c, string $action): array
+    {
+        $actor = match ($action) {
+            'approve', 'reject' => 1202,
+            'publish' => 1203,
+        };
+        $this->actor($actor);
+        $reason = match ($action) {
+            'approve' => 'evidence_reviewed',
+            'reject' => 'insufficient_evidence',
+            'publish' => 'approved_appendix',
+        };
+        return app(CheckoutCodDailyCorrectionService::class)->act(
+            $c['correction_key'], (string) Str::uuid(), $action, $reason
+        );
+    }
+
+    private function codCorrection46AddGatewayReversal(): void
+    {
+        $reference = (string) DB::table('checkout_cod_bank_receipt_postings')
+            ->orderByDesc('id')->value('reference_hmac');
+        $at = CarbonImmutable::now('UTC');
+        $nonceId = (int) DB::table('checkout_cod_gateway_nonces')->insertGetId([
+            'key_id' => 'testprovider46',
+            'nonce' => (string) Str::uuid(),
+            'body_sha256' => str_repeat('a', 64),
+            'received_at' => $at,
+        ]);
+        DB::table('checkout_cod_gateway_reports')->insert([
+            'event_key' => (string) Str::uuid(),
+            'nonce_id' => $nonceId,
+            'key_id' => 'testprovider46',
+            'reference_hmac' => $reference,
+            'event_kind' => 'reversal_reported',
+            'net_minor' => 680,
+            'currency_code' => 'UAH',
+            'signed_at_epoch' => $at->timestamp,
+            'body_sha256' => str_repeat('a', 64),
+            'received_at' => $at,
+        ]);
+    }
+    public function test_cod_correction46_no_late_change_cannot_create_appendix(): void
+    {
+        $f = $this->codCorrection46Fixture(false);
+        $this->expectException(DomainException::class);
+        $this->codCorrection46Propose($f);
+    }
+
+    public function test_cod_correction46_late_register_detected_and_signed(): void
+    {
+        $f = $this->codCorrection46Fixture();
+        $c = $this->codCorrection46Propose($f);
+        $this->assertSame('proposed', $c['status']);
+        $this->assertTrue($c['observation']['has_changes']);
+        $this->assertSame(1, $c['observation']['late_signals']['late_register_claims_count']);
+        $this->assertSame(1, $c['observation']['delta']['register_claims_count']['difference']);
+        $this->assertSame(680, $c['observation']['baseline']['posted_bank_minor']);
+        $this->assertFalse($c['cod_paid']);
+        $this->assertDatabaseCount('checkout_cod_daily_corrections', 1);
+        $this->assertDatabaseCount('checkout_cod_daily_correction_events', 1);
+    }
+
+    public function test_cod_correction46_incorrect_reason_is_rejected(): void
+    {
+        $f = $this->codCorrection46Fixture();
+        $this->expectException(DomainException::class);
+        $this->codCorrection46Propose($f, null, 'late_bank_booking');
+    }
+
+    public function test_cod_correction46_sealer_cannot_propose_even_with_permission(): void
+    {
+        $f = $this->codCorrection46Fixture();
+        Gate::define(CheckoutCodDailyCorrectionService::PROPOSE_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 1200);
+        $this->actor(1200);
+        $this->expectException(DomainException::class);
+        $this->codCorrection46Propose($f);
+    }
+
+    public function test_cod_correction46_proposal_uuid_replay_and_observation_deduplication(): void
+    {
+        $f = $this->codCorrection46Fixture();
+        $op = (string) Str::uuid();
+        $a = $this->codCorrection46Propose($f, $op);
+        $b = $this->codCorrection46Propose($f, $op);
+        $this->assertSame($a['correction_key'], $b['correction_key']);
+        $this->assertFalse($a['idempotent_replay']);
+        $this->assertTrue($b['idempotent_replay']);
+        $this->assertDatabaseCount('checkout_cod_daily_corrections', 1);
+        $this->expectException(DomainException::class);
+        $this->codCorrection46Propose($f);
+    }
+
+    public function test_cod_correction46_independent_approval_and_publication(): void
+    {
+        $f = $this->codCorrection46Fixture();
+        $p = $this->codCorrection46Propose($f);
+        $a = $this->codCorrection46Action($p, 'approve');
+        $this->assertSame('approved', $a['status']);
+        $b = $this->codCorrection46Action($p, 'publish');
+        $this->assertSame('published', $b['status']);
+        $this->actor(1204);
+        $check = app(CheckoutCodDailyCorrectionService::class)
+            ->verify($p['correction_key'], true);
+        $this->assertTrue($check['integrity']['valid']);
+        $this->assertTrue($check['base_report_integrity']['valid']);
+        $this->assertTrue($check['source_evidence_still_current']);
+        $this->assertSame(3, $check['integrity']['events_checked']);
+        $this->assertDatabaseCount('checkout_cod_daily_reports', 1);
+        $this->assertSame('pending', DB::table('orders')
+            ->where('order_key', $this->orderKey)->value('payment_status'));
+    }
+
+    public function test_cod_correction46_author_cannot_review_own_proposal(): void
+    {
+        $f = $this->codCorrection46Fixture();
+        $c = $this->codCorrection46Propose($f);
+        Gate::define(CheckoutCodDailyCorrectionService::REVIEW_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 1201);
+        $this->actor(1201);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodDailyCorrectionService::class)->act(
+            $c['correction_key'], (string) Str::uuid(), 'approve', 'evidence_reviewed'
+        );
+    }
+
+    public function test_cod_correction46_reviewer_cannot_publish_their_approval(): void
+    {
+        $f = $this->codCorrection46Fixture();
+        $c = $this->codCorrection46Propose($f);
+        $this->codCorrection46Action($c, 'approve');
+        Gate::define(CheckoutCodDailyCorrectionService::PUBLISH_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 1202);
+        $this->actor(1202);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodDailyCorrectionService::class)->act(
+            $c['correction_key'], (string) Str::uuid(), 'publish', 'approved_appendix'
+        );
+    }
+
+    public function test_cod_correction46_rejection_is_terminal(): void
+    {
+        $f = $this->codCorrection46Fixture();
+        $c = $this->codCorrection46Propose($f);
+        $r = $this->codCorrection46Action($c, 'reject');
+        $this->assertSame('rejected', $r['status']);
+        $this->expectException(DomainException::class);
+        $this->codCorrection46Action($c, 'approve');
+    }
+
+    public function test_cod_correction46_late_gateway_reversal_detected(): void
+    {
+        $f = $this->codCorrection46Fixture(false);
+        CarbonImmutable::setTestNow(CarbonImmutable::now('UTC')->addMinute());
+        $this->codCorrection46AddGatewayReversal();
+        $c = $this->codCorrection46Propose($f, null, 'late_financial_evidence');
+        $this->assertSame(1,
+            $c['observation']['late_signals']['late_gateway_reversal_reports_count']);
+        $this->assertSame([], $c['observation']['delta']);
+    }
+
+    public function test_cod_correction46_new_evidence_invalidates_review(): void
+    {
+        $f = $this->codCorrection46Fixture();
+        $c = $this->codCorrection46Propose($f);
+        CarbonImmutable::setTestNow(CarbonImmutable::now('UTC')->addMinute());
+        $this->codCorrection46AddGatewayReversal();
+        $this->actor(1202);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodDailyCorrectionService::class)->act(
+            $c['correction_key'], (string) Str::uuid(), 'approve', 'evidence_reviewed'
+        );
+    }
+
+    public function test_cod_correction46_stale_proposal_can_be_rejected(): void
+    {
+        $f = $this->codCorrection46Fixture();
+        $c = $this->codCorrection46Propose($f);
+        CarbonImmutable::setTestNow(CarbonImmutable::now('UTC')->addMinute());
+        $this->codCorrection46AddGatewayReversal();
+        $reject = $this->codCorrection46Action($c, 'reject');
+        $this->assertSame('rejected', $reject['status']);
+    }
+
+    public function test_cod_correction46_wrong_role_cannot_approve(): void
+    {
+        $f = $this->codCorrection46Fixture();
+        $c = $this->codCorrection46Propose($f);
+        $this->actor(1204);
+        $this->expectException(AuthorizationException::class);
+        app(CheckoutCodDailyCorrectionService::class)->act(
+            $c['correction_key'], (string) Str::uuid(), 'approve', 'evidence_reviewed'
+        );
+    }
+
+    public function test_cod_correction46_approval_uuid_replays_without_new_event(): void
+    {
+        $f = $this->codCorrection46Fixture();
+        $c = $this->codCorrection46Propose($f);
+        $this->actor(1202);
+        $op = (string) Str::uuid();
+        $svc = app(CheckoutCodDailyCorrectionService::class);
+        $a = $svc->act($c['correction_key'], $op, 'approve', 'evidence_reviewed');
+        $b = $svc->act($c['correction_key'], $op, 'approve', 'evidence_reviewed');
+        $this->assertFalse($a['idempotent_replay']);
+        $this->assertTrue($b['idempotent_replay']);
+        $this->assertDatabaseCount('checkout_cod_daily_correction_events', 2);
+    }
+
+    public function test_cod_correction46_published_csv_audited_and_idempotent(): void
+    {
+        $f = $this->codCorrection46Fixture();
+        $c = $this->codCorrection46Propose($f);
+        $this->codCorrection46Action($c, 'approve');
+        $this->codCorrection46Action($c, 'publish');
+        $this->actor(1204);
+        $op = (string) Str::uuid();
+        $svc = app(CheckoutCodDailyCorrectionService::class);
+        $a = $svc->exportCsv($c['correction_key'], $op);
+        $b = $svc->exportCsv($c['correction_key'], $op);
+        $this->assertFalse($a['idempotent_replay']);
+        $this->assertTrue($b['idempotent_replay']);
+        $this->assertSame($a['csv'], $b['csv']);
+        $this->assertStringContainsString('financial,register_claims_count,0,1,1,count', $a['csv']);
+        $this->assertStringNotContainsString('Петренко', $a['csv']);
+        $this->assertDatabaseCount('checkout_cod_daily_correction_events', 4);
+        $this->assertTrue($svc->verify($c['correction_key'])['integrity']['valid']);
+    }
+
+    public function test_cod_correction46_unpublished_csv_cannot_be_exported(): void
+    {
+        $f = $this->codCorrection46Fixture();
+        $c = $this->codCorrection46Propose($f);
+        $this->actor(1204);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodDailyCorrectionService::class)->exportCsv(
+            $c['correction_key'], (string) Str::uuid()
+        );
+    }
+
+    public function test_cod_correction46_event_rows_cannot_be_mutated(): void
+    {
+        $f = $this->codCorrection46Fixture();
+        $this->codCorrection46Propose($f);
+        $this->expectException(QueryException::class);
+        DB::table('checkout_cod_daily_correction_events')->update([
+            'actor_id' => 999,
+        ]);
+    }
+
+    public function test_cod_correction46_history_and_listing_show_appendix(): void
+    {
+        $f = $this->codCorrection46Fixture();
+        $c = $this->codCorrection46Propose($f);
+        $this->codCorrection46Action($c, 'approve');
+        $this->codCorrection46Action($c, 'publish');
+        $this->actor(1204);
+        $svc = app(CheckoutCodDailyCorrectionService::class);
+        $history = $svc->history($c['correction_key'], null, 2);
+        $this->assertCount(2, $history['items']);
+        $this->assertNotNull($history['next_before_id']);
+        $older = $svc->history($c['correction_key'], $history['next_before_id'], 2);
+        $this->assertSame('proposed', $older['items'][0]['event_kind']);
+        $list = $svc->listing($f['report']['report_key']);
+        $this->assertSame($c['correction_key'], $list['items'][0]['correction_key']);
+    }
+
+    public function test_cod_correction46_routes_registered(): void
+    {
+        foreach ([
+                     'cod.correction46.index', 'cod.correction46.propose',
+                     'cod.correction46.show', 'cod.correction46.verify',
+                     'cod.correction46.act', 'cod.correction46.events',
+                     'cod.correction46.csv',
+                 ] as $name) {
+            $this->assertTrue(\Illuminate\Support\Facades\Route::has($name));
+        }
+    }
+
+    // ============================================================
+    // BLOCK 47 — IMMUTABLE DAILY MONITORING, ACKNOWLEDGEMENTS
+    // ============================================================
+
+    private function codMonitor47Gate(): void
+    {
+        $this->codCorrection46Gate();
+
+        Gate::define(
+            CheckoutCodDailyMonitorService::VIEW_ABILITY,
+            static fn ($u): bool => in_array((int) $u->getAuthIdentifier(), [1200, 1204], true)
+        );
+
+        Gate::define(
+            CheckoutCodDailyMonitorService::ACK_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 1204
+        );
+    }
+
+    private function codMonitor47Fixture(bool $lateRegister = true): array
+    {
+        $fixture = $this->codCorrection46Fixture($lateRegister);
+        $this->codMonitor47Gate();
+        return $fixture;
+    }
+
+    private function codMonitor47Scan(int $limit = 50): array
+    {
+        return app(CheckoutCodDailyMonitorService::class)->scan($limit);
+    }
+
+    private function codMonitor47Latest(string $scope = 'all'): array
+    {
+        $this->actor(1204);
+
+        return app(CheckoutCodDailyMonitorService::class)
+            ->listing($scope)['items'][0];
+    }
+
+    public function test_cod_monitor47_clean_report_is_archived_as_no_attention(): void
+    {
+        $f = $this->codMonitor47Fixture(false);
+        $result = $this->codMonitor47Scan();
+
+        $this->assertSame(1, $result['scanned']);
+        $this->assertSame(1, $result['signals_created']);
+
+        $signal = $this->codMonitor47Latest();
+
+        $this->assertSame('clean', $signal['coverage_status']);
+        $this->assertSame('none', $signal['severity']);
+        $this->assertSame($f['report']['report_key'], $signal['report_key']);
+        $this->assertFalse($signal['customer_payment_confirmed']);
+    }
+
+    public function test_cod_monitor47_late_register_flags_correction_required(): void
+    {
+        $this->codMonitor47Fixture();
+        $this->codMonitor47Scan();
+
+        $signal = $this->codMonitor47Latest();
+
+        $this->assertSame('correction_required', $signal['coverage_status']);
+        $this->assertSame('critical', $signal['severity']);
+        $this->assertSame('propose', $signal['next_action']);
+
+        $this->assertCount(
+            1,
+            app(CheckoutCodDailyMonitorService::class)
+                ->listing('unacknowledged')['items']
+        );
+    }
+
+    public function test_cod_monitor47_periodic_rescan_is_deduplicated(): void
+    {
+        $this->codMonitor47Fixture();
+
+        $this->assertSame(1, $this->codMonitor47Scan()['signals_created']);
+        $this->assertSame(0, $this->codMonitor47Scan()['signals_created']);
+        $this->assertSame(0, $this->codMonitor47Scan()['signals_created']);
+
+        $this->assertDatabaseCount('checkout_cod_daily_monitor_signals', 1);
+    }
+
+    public function test_cod_monitor47_proposed_appendix_waits_for_independent_review(): void
+    {
+        $f = $this->codMonitor47Fixture();
+
+        $this->codMonitor47Scan();
+
+        $this->actor(1201);
+        $this->codCorrection46Propose($f);
+
+        $this->codMonitor47Scan();
+
+        $this->assertSame(
+            'awaiting_review',
+            $this->codMonitor47Latest()['coverage_status']
+        );
+        $this->assertDatabaseCount('checkout_cod_daily_monitor_signals', 2);
+    }
+
+    public function test_cod_monitor47_approved_appendix_waits_for_publication(): void
+    {
+        $f = $this->codMonitor47Fixture();
+
+        $this->actor(1201);
+        $c = $this->codCorrection46Propose($f);
+
+        $this->codCorrection46Action($c, 'approve');
+
+        $this->codMonitor47Scan();
+
+        $this->assertSame(
+            'awaiting_publication',
+            $this->codMonitor47Latest()['coverage_status']
+        );
+    }
+
+    public function test_cod_monitor47_published_matching_appendix_covers_evidence(): void
+    {
+        $f = $this->codMonitor47Fixture();
+
+        $this->actor(1201);
+        $c = $this->codCorrection46Propose($f);
+
+        $this->codCorrection46Action($c, 'approve');
+        $this->codCorrection46Action($c, 'publish');
+
+        $this->codMonitor47Scan();
+
+        $signal = $this->codMonitor47Latest();
+
+        $this->assertSame('covered', $signal['coverage_status']);
+
+        $this->assertSame(
+            [],
+            app(CheckoutCodDailyMonitorService::class)
+                ->listing('attention')['items']
+        );
+    }
+
+    public function test_cod_monitor47_rejected_appendix_remains_attention_required(): void
+    {
+        $f = $this->codMonitor47Fixture();
+
+        $this->actor(1201);
+        $c = $this->codCorrection46Propose($f);
+
+        $this->codCorrection46Action($c, 'reject');
+        $this->codMonitor47Scan();
+
+        $signal = $this->codMonitor47Latest();
+
+        $this->assertSame('rejected_requires_action', $signal['coverage_status']);
+        $this->assertSame('investigate', $signal['next_action']);
+    }
+
+    public function test_cod_monitor47_new_evidence_after_publication_reopens_attention(): void
+    {
+        $f = $this->codMonitor47Fixture();
+
+        $this->actor(1201);
+        $c = $this->codCorrection46Propose($f);
+
+        $this->codCorrection46Action($c, 'approve');
+        $this->codCorrection46Action($c, 'publish');
+        $this->codMonitor47Scan();
+
+        CarbonImmutable::setTestNow(
+            CarbonImmutable::now('UTC')->addMinute()
+        );
+        $this->codCorrection46AddGatewayReversal();
+
+        $this->codMonitor47Scan();
+
+        $signal = $this->codMonitor47Latest();
+
+        $this->assertSame('changed_after_publication', $signal['coverage_status']);
+        $this->assertSame('propose_updated', $signal['next_action']);
+    }
+
+    public function test_cod_monitor47_attention_receipt_is_audited_not_payment(): void
+    {
+        $this->codMonitor47Fixture();
+        $this->codMonitor47Scan();
+
+        $signal = $this->codMonitor47Latest();
+
+        $r = app(CheckoutCodDailyMonitorService::class)
+            ->acknowledge($signal['signal_id'], (string) Str::uuid());
+
+        $this->assertSame(1204, $r['acknowledged_by']);
+        $this->assertFalse($r['financial_evidence_approved']);
+        $this->assertFalse($r['orders_payment_status_changed']);
+
+        $this->assertDatabaseCount('checkout_cod_daily_monitor_receipts', 1);
+
+        $this->assertSame(
+            [],
+            app(CheckoutCodDailyMonitorService::class)
+                ->listing('unacknowledged')['items']
+        );
+
+        $this->assertSame(
+            'pending',
+            DB::table('orders')
+                ->where('order_key', $this->orderKey)
+                ->value('payment_status')
+        );
+    }
+
+    public function test_cod_monitor47_receipt_operation_uuid_is_idempotent(): void
+    {
+        $this->codMonitor47Fixture();
+        $this->codMonitor47Scan();
+
+        $signal = $this->codMonitor47Latest();
+        $svc = app(CheckoutCodDailyMonitorService::class);
+        $op = (string) Str::uuid();
+
+        $first = $svc->acknowledge($signal['signal_id'], $op);
+        $again = $svc->acknowledge($signal['signal_id'], $op);
+
+        $this->assertFalse($first['idempotent_replay']);
+        $this->assertTrue($again['idempotent_replay']);
+
+        $this->assertDatabaseCount('checkout_cod_daily_monitor_receipts', 1);
+    }
+
+    public function test_cod_monitor47_wrong_employee_cannot_acknowledge(): void
+    {
+        $this->codMonitor47Fixture();
+        $this->codMonitor47Scan();
+
+        $signal = $this->codMonitor47Latest();
+        $this->actor(1201);
+
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodDailyMonitorService::class)->acknowledge(
+            $signal['signal_id'], (string) Str::uuid()
+        );
+    }
+
+    public function test_cod_monitor47_clean_signal_cannot_be_acknowledged(): void
+    {
+        $this->codMonitor47Fixture(false);
+        $this->codMonitor47Scan();
+
+        $signal = $this->codMonitor47Latest();
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodDailyMonitorService::class)->acknowledge(
+            $signal['signal_id'], (string) Str::uuid()
+        );
+    }
+
+    public function test_cod_monitor47_superseded_signal_requires_new_receipt(): void
+    {
+        $f = $this->codMonitor47Fixture();
+
+        $this->codMonitor47Scan();
+        $signal = $this->codMonitor47Latest();
+
+        $this->actor(1201);
+        $this->codCorrection46Propose($f);
+
+        $this->codMonitor47Scan();
+
+        $this->actor(1204);
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodDailyMonitorService::class)->acknowledge(
+            $signal['signal_id'], (string) Str::uuid()
+        );
+    }
+
+    public function test_cod_monitor47_single_receipt_per_signal(): void
+    {
+        $this->codMonitor47Fixture();
+        $this->codMonitor47Scan();
+
+        $signal = $this->codMonitor47Latest();
+        $svc = app(CheckoutCodDailyMonitorService::class);
+
+        $svc->acknowledge($signal['signal_id'], (string) Str::uuid());
+
+        $this->expectException(DomainException::class);
+
+        $svc->acknowledge($signal['signal_id'], (string) Str::uuid());
+    }
+
+    public function test_cod_monitor47_monitor_history_shows_state_transitions(): void
+    {
+        $f = $this->codMonitor47Fixture();
+
+        $this->codMonitor47Scan();
+
+        $this->actor(1201);
+        $c = $this->codCorrection46Propose($f);
+
+        $this->codMonitor47Scan();
+        $this->codCorrection46Action($c, 'approve');
+        $this->codMonitor47Scan();
+
+        $this->actor(1204);
+        $svc = app(CheckoutCodDailyMonitorService::class);
+
+        $first = $svc->history($f['report']['report_key'], null, 2);
+
+        $this->assertCount(2, $first['items']);
+        $this->assertSame('awaiting_publication', $first['items'][0]['coverage_status']);
+        $this->assertNotNull($first['next_before_id']);
+
+        $next = $svc->history(
+            $f['report']['report_key'],
+            $first['next_before_id'],
+            2
+        );
+
+        $this->assertCount(1, $next['items']);
+        $this->assertSame('correction_required', $next['items'][0]['coverage_status']);
+    }
+
+    public function test_cod_monitor47_postgresql_prevents_signal_mutation(): void
+    {
+        $this->codMonitor47Fixture();
+        $this->codMonitor47Scan();
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_daily_monitor_signals')
+            ->update(['severity' => 'none']);
+    }
+
+    public function test_cod_monitor47_artisan_command_checks_sealed_reports(): void
+    {
+        $this->codMonitor47Fixture();
+
+        $this->assertSame(
+            0,
+            Artisan::call('cod:daily-monitor', ['--limit' => 50])
+        );
+
+        $this->assertDatabaseCount('checkout_cod_daily_monitor_signals', 1);
+    }
+
+    public function test_cod_monitor47_scan_cursor_advances_across_report_pages(): void
+    {
+        $f = $this->codMonitor47Fixture(false);
+
+        $this->actor(1200);
+
+        $previousDay = CarbonImmutable::parse(
+            $f['report']['report_date']
+        )->subDay()->toDateString();
+
+        $this->codDaily45Seal($previousDay);
+        $this->codMonitor47Gate();
+
+        $this->assertSame(1, $this->codMonitor47Scan(1)['scanned']);
+        $this->assertSame(1, $this->codMonitor47Scan(1)['scanned']);
+
+        $this->assertDatabaseCount('checkout_cod_daily_monitor_signals', 2);
+    }
+
+    public function test_cod_monitor47_invalid_scan_limit_rejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        app(CheckoutCodDailyMonitorService::class)->scan(0);
+    }
+
+    public function test_cod_monitor47_routes_exist(): void
+    {
+        foreach ([
+                     'cod.monitor47.index',
+                     'cod.monitor47.history',
+                     'cod.monitor47.acknowledge',
                  ] as $name) {
             $this->assertTrue(
                 \Illuminate\Support\Facades\Route::has($name)

@@ -22,6 +22,27 @@ final class CheckoutCodAnalyticsService
     public function report(?string $from = null, ?string $to = null): array
     {
         $this->authorize();
+
+        return $this->aggregate($from, $to);
+    }
+
+    /**
+     * Trusted console-only read for scheduled internal monitoring.
+     * This method is not exposed by an HTTP route.
+     */
+    public function systemSnapshot(?string $from = null, ?string $to = null): array
+    {
+        if (!app()->runningInConsole()) {
+            throw new AuthorizationException(
+                'System COD analytics are available only to trusted console processes'
+            );
+        }
+
+        return $this->aggregate($from, $to);
+    }
+
+    private function aggregate(?string $from, ?string $to): array
+    {
         $asOf = CarbonImmutable::now('UTC');
         $w = CheckoutCodAnalyticsWindow::make($from, $to, $asOf);
 

@@ -291,3 +291,122 @@ Route::post(
         ->middleware('throttle:30,1')
         ->name('cod.daily45.show');
 });
+
+
+// ============================================================
+// BOARDRIDERS BLOCK 46 — COD DAILY REPORT CORRECTIONS
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])->prefix('v1/admin/cod')->group(function (): void {
+
+    \Illuminate\Support\Facades\Route::get(
+        '/daily-reports/{reportKey}/corrections',
+        [
+            \App\Http\Controllers\Api\CheckoutCodDailyCorrectionController::class,
+            'index',
+        ]
+    )->whereUuid('reportKey')
+        ->middleware('throttle:30,1')
+        ->name('cod.correction46.index');
+
+    \Illuminate\Support\Facades\Route::post(
+        '/daily-reports/{reportKey}/corrections',
+        [
+            \App\Http\Controllers\Api\CheckoutCodDailyCorrectionController::class,
+            'propose',
+        ]
+    )->whereUuid('reportKey')
+        ->middleware('throttle:5,1')
+        ->name('cod.correction46.propose');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/corrections/{correctionKey}/verify',
+        [
+            \App\Http\Controllers\Api\CheckoutCodDailyCorrectionController::class,
+            'verify',
+        ]
+    )->whereUuid('correctionKey')
+        ->middleware('throttle:10,1')
+        ->name('cod.correction46.verify');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/corrections/{correctionKey}/events',
+        [
+            \App\Http\Controllers\Api\CheckoutCodDailyCorrectionController::class,
+            'events',
+        ]
+    )->whereUuid('correctionKey')
+        ->middleware('throttle:30,1')
+        ->name('cod.correction46.events');
+
+    \Illuminate\Support\Facades\Route::post(
+        '/corrections/{correctionKey}/actions',
+        [
+            \App\Http\Controllers\Api\CheckoutCodDailyCorrectionController::class,
+            'act',
+        ]
+    )->whereUuid('correctionKey')
+        ->middleware('throttle:10,1')
+        ->name('cod.correction46.act');
+
+    \Illuminate\Support\Facades\Route::post(
+        '/corrections/{correctionKey}/export.csv',
+        [
+            \App\Http\Controllers\Api\CheckoutCodDailyCorrectionController::class,
+            'csv',
+        ]
+    )->whereUuid('correctionKey')
+        ->middleware('throttle:5,1')
+        ->name('cod.correction46.csv');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/corrections/{correctionKey}',
+        [
+            \App\Http\Controllers\Api\CheckoutCodDailyCorrectionController::class,
+            'show',
+        ]
+    )->whereUuid('correctionKey')
+        ->middleware('throttle:30,1')
+        ->name('cod.correction46.show');
+});
+
+
+// ============================================================
+// BOARDRIDERS BLOCK 47 — DAILY COD MONITORING
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])->prefix('v1/admin/cod/daily-monitor')->group(function (): void {
+
+    \Illuminate\Support\Facades\Route::get(
+        '/',
+        [
+            \App\Http\Controllers\Api\CheckoutCodDailyMonitorController::class,
+            'index',
+        ]
+    )->middleware('throttle:30,1')
+        ->name('cod.monitor47.index');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/reports/{reportKey}/history',
+        [
+            \App\Http\Controllers\Api\CheckoutCodDailyMonitorController::class,
+            'history',
+        ]
+    )->whereUuid('reportKey')
+        ->middleware('throttle:30,1')
+        ->name('cod.monitor47.history');
+
+    \Illuminate\Support\Facades\Route::post(
+        '/signals/{signalId}/acknowledge',
+        [
+            \App\Http\Controllers\Api\CheckoutCodDailyMonitorController::class,
+            'acknowledge',
+        ]
+    )->whereNumber('signalId')
+        ->middleware('throttle:20,1')
+        ->name('cod.monitor47.acknowledge');
+});

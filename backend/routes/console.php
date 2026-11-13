@@ -23,3 +23,9 @@ Schedule::command(
 )
     ->everyMinute()
     ->withoutOverlapping(10);
+
+
+// BLOCK 47 — scheduled monitoring of sealed COD reports.
+Schedule::command('cod:daily-monitor --limit=50')
+    ->everyFiveMinutes()
+    ->withoutOverlapping(15);
