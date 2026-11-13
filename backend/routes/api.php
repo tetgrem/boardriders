@@ -410,3 +410,50 @@ Route::post(
         ->middleware('throttle:20,1')
         ->name('cod.monitor47.acknowledge');
 });
+
+// ============================================================
+// BOARDRIDERS BLOCK 48 — FINANCIAL CORRECTION SLA
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])->prefix('v1/admin/cod/correction-sla')->group(function (): void {
+
+    \Illuminate\Support\Facades\Route::get(
+        '/',
+        [
+            \App\Http\Controllers\Api\CheckoutCodCorrectionSlaController::class,
+            'index',
+        ]
+    )->middleware('throttle:30,1')
+        ->name('cod.sla48.index');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/summary',
+        [
+            \App\Http\Controllers\Api\CheckoutCodCorrectionSlaController::class,
+            'summary',
+        ]
+    )->middleware('throttle:30,1')
+        ->name('cod.sla48.summary');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/corrections/{correctionKey}/history',
+        [
+            \App\Http\Controllers\Api\CheckoutCodCorrectionSlaController::class,
+            'history',
+        ]
+    )->whereUuid('correctionKey')
+        ->middleware('throttle:30,1')
+        ->name('cod.sla48.history');
+
+    \Illuminate\Support\Facades\Route::post(
+        '/alerts/{alertId}/acknowledge',
+        [
+            \App\Http\Controllers\Api\CheckoutCodCorrectionSlaController::class,
+            'acknowledge',
+        ]
+    )->whereNumber('alertId')
+        ->middleware('throttle:20,1')
+        ->name('cod.sla48.acknowledge');
+});

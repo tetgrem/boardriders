@@ -29,3 +29,9 @@ Schedule::command(
 Schedule::command('cod:daily-monitor --limit=50')
     ->everyFiveMinutes()
     ->withoutOverlapping(15);
+
+
+// BLOCK 48 — SLA monitoring of financial correction approvals.
+Schedule::command('cod:correction-sla --limit=50')
+    ->everyFiveMinutes()
+    ->withoutOverlapping(15);

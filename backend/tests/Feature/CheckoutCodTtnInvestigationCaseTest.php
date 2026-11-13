@@ -2,6 +2,8 @@
 
 namespace Tests\Feature;
 
+use App\Services\Pricing\CheckoutCodCorrectionSlaScanService;
+use App\Services\Pricing\CheckoutCodCorrectionSlaInboxService;
 use App\Services\Pricing\CheckoutCodDailyMonitorService;
 use App\Services\Pricing\CheckoutCodDailyCorrectionService;
 use App\Services\Pricing\CheckoutCodDailyReportService;
@@ -12263,5 +12265,287 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
                 \Illuminate\Support\Facades\Route::has($name)
             );
         }
+    }
+
+    // ============================================================
+    // BLOCK 48 — COD CORRECTION SLA, ESCALATION AND ROLE-SCOPED CRM
+    // ============================================================
+
+    private function codSla48Gate(): void
+    {
+        $this->codCorrection46Gate();
+        $viewers = static fn ($u): bool => in_array(
+            (int) $u->getAuthIdentifier(), [1200, 1201, 1202, 1203, 1204, 1205, 1206], true
+        );
+        Gate::define(CheckoutCodTtnInvestigationStatusService::VIEW_ABILITY, $viewers);
+        Gate::define(CheckoutCodDailyReportService::VIEW_ABILITY, $viewers);
+        Gate::define(CheckoutCodCorrectionSlaInboxService::VIEW_ABILITY, $viewers);
+        Gate::define(CheckoutCodCorrectionSlaInboxService::ACK_ABILITY, $viewers);
+        Gate::define(CheckoutCodCorrectionSlaInboxService::REVIEW_TEAM_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 1204);
+        Gate::define(CheckoutCodCorrectionSlaInboxService::PUBLICATION_TEAM_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 1205);
+        Gate::define(CheckoutCodCorrectionSlaInboxService::MANAGEMENT_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 1206);
+    }
+
+    private function codSla48Fixture(): array
+    {
+        $f = $this->codCorrection46Fixture();
+        $this->actor(1201);
+        $correction = $this->codCorrection46Propose($f);
+        $this->codSla48Gate();
+        return [$f, $correction];
+    }
+
+    private function codSla48Advance(array $correction, string $kind, int $minutes): void
+    {
+        $started = DB::table('checkout_cod_daily_correction_events')
+            ->where('correction_id', $correction['id'])
+            ->where('event_kind', $kind)
+            ->orderByDesc('id')->value('created_at');
+        $this->assertNotNull($started);
+        CarbonImmutable::setTestNow(CarbonImmutable::parse($started)->addMinutes($minutes));
+    }
+
+    private function codSla48Scan(int $limit = 50): array
+    {
+        return app(CheckoutCodCorrectionSlaScanService::class)->scan($limit);
+    }
+
+    private function codSla48Inbox(string $scope = 'all', int $actor = 1204): array
+    {
+        $this->actor($actor);
+        return app(CheckoutCodCorrectionSlaInboxService::class)->listing($scope)['items'];
+    }
+    public function test_cod_sla48_no_warning_before_review_window(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->codSla48Advance($c, 'proposed', 175);
+        $this->assertSame(0, $this->codSla48Scan()['new_alerts']);
+        $this->assertDatabaseCount('checkout_cod_correction_sla_alerts', 0);
+    }
+
+    public function test_cod_sla48_review_warning_targets_review_team_only(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->codSla48Advance($c, 'proposed', 180);
+        $this->assertSame(1, $this->codSla48Scan()['new_alerts']);
+        $alert = $this->codSla48Inbox()[0];
+        $this->assertSame('due_soon', $alert['stage']);
+        $this->assertSame('review', $alert['phase']);
+        $this->assertSame('finance_review', $alert['target_role']);
+        $this->assertSame([], $this->codSla48Inbox('all', 1205));
+        $this->assertSame('pending', DB::table('orders')
+            ->where('order_key', $this->orderKey)->value('payment_status'));
+    }
+
+    public function test_cod_sla48_rescan_does_not_duplicate_stage(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->codSla48Advance($c, 'proposed', 185);
+        $this->assertSame(1, $this->codSla48Scan()['new_alerts']);
+        $this->assertSame(0, $this->codSla48Scan()['new_alerts']);
+        $this->assertDatabaseCount('checkout_cod_correction_sla_alerts', 1);
+    }
+
+    public function test_cod_sla48_escalates_at_deadline_four_and_twenty_four_hours(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->codSla48Advance($c, 'proposed', 240);
+        $this->codSla48Scan();
+        $this->assertSame('overdue', $this->codSla48Inbox()[0]['stage']);
+        $this->codSla48Advance($c, 'proposed', 480);
+        $this->codSla48Scan();
+        $this->assertSame('overdue_4h', $this->codSla48Inbox('all', 1206)[0]['stage']);
+        $this->codSla48Advance($c, 'proposed', 1680);
+        $this->codSla48Scan();
+        $this->assertSame('overdue_24h', $this->codSla48Inbox('all', 1206)[0]['stage']);
+        $this->assertDatabaseCount('checkout_cod_correction_sla_alerts', 3);
+    }
+
+    public function test_cod_sla48_management_escalation_replaces_team_current_item(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->codSla48Advance($c, 'proposed', 240);
+        $this->codSla48Scan();
+        $this->codSla48Advance($c, 'proposed', 480);
+        $this->codSla48Scan();
+        $this->assertSame([], $this->codSla48Inbox('all', 1204));
+        $this->actor(1206);
+        $summary = app(CheckoutCodCorrectionSlaInboxService::class)->summary();
+        $this->assertSame(1, $summary['active_alerts']);
+        $this->assertSame(1, $summary['critical']);
+        $this->assertSame(1, $summary['management_escalations']);
+    }
+
+    public function test_cod_sla48_approval_starts_new_publication_deadline(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->codSla48Advance($c, 'proposed', 190);
+        $this->codSla48Scan();
+        $this->codCorrection46Action($c, 'approve');
+        $this->codSla48Advance($c, 'approved', 65);
+        $this->codSla48Scan();
+        $this->assertSame([], $this->codSla48Inbox('all', 1204));
+        $alert = $this->codSla48Inbox('all', 1205)[0];
+        $this->assertSame('publication', $alert['phase']);
+        $this->assertSame('due_soon', $alert['stage']);
+        $this->assertDatabaseCount('checkout_cod_correction_sla_alerts', 2);
+    }
+
+    public function test_cod_sla48_published_correction_hides_active_alert_but_keeps_history(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->codCorrection46Action($c, 'approve');
+        $this->codSla48Advance($c, 'approved', 70);
+        $this->codSla48Scan();
+        $this->assertCount(1, $this->codSla48Inbox('all', 1205));
+        $this->codCorrection46Action($c, 'publish');
+        $this->assertSame([], $this->codSla48Inbox('all', 1205));
+        $this->actor(1205);
+        $history = app(CheckoutCodCorrectionSlaInboxService::class)
+            ->history($c['correction_key']);
+        $this->assertCount(1, $history['items']);
+    }
+
+    public function test_cod_sla48_rejected_correction_escalates_to_management_immediately(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->codCorrection46Action($c, 'reject');
+        $this->codSla48Scan();
+        $alert = $this->codSla48Inbox('all', 1206)[0];
+        $this->assertSame('rejection', $alert['phase']);
+        $this->assertSame('rejected_action', $alert['stage']);
+        $this->assertSame('critical', $alert['severity']);
+        $this->assertSame([], $this->codSla48Inbox('all', 1204));
+    }
+
+    public function test_cod_sla48_rejected_followup_becomes_overdue_after_one_day(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->codCorrection46Action($c, 'reject');
+        $this->codSla48Scan();
+        $this->codSla48Advance($c, 'rejected', 1440);
+        $this->codSla48Scan();
+        $this->assertSame('overdue', $this->codSla48Inbox('all', 1206)[0]['stage']);
+        $this->assertDatabaseCount('checkout_cod_correction_sla_alerts', 2);
+    }
+    public function test_cod_sla48_acknowledgement_is_idempotent_not_financial_approval(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->codSla48Advance($c, 'proposed', 180);
+        $this->codSla48Scan();
+        $alert = $this->codSla48Inbox()[0];
+        $service = app(CheckoutCodCorrectionSlaInboxService::class);
+        $op = (string) Str::uuid();
+        $first = $service->acknowledge($alert['alert_id'], $op);
+        $replay = $service->acknowledge($alert['alert_id'], $op);
+        $this->assertFalse($first['idempotent_replay']);
+        $this->assertTrue($replay['idempotent_replay']);
+        $this->assertFalse($replay['financial_approval_performed']);
+        $this->assertSame([], $service->listing('unacknowledged')['items']);
+        $this->assertDatabaseCount('checkout_cod_correction_sla_receipts', 1);
+    }
+
+    public function test_cod_sla48_wrong_team_cannot_acknowledge_an_alert(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->codSla48Advance($c, 'proposed', 180);
+        $this->codSla48Scan();
+        $alertId = (int) DB::table('checkout_cod_correction_sla_alerts')->value('id');
+        $this->actor(1205);
+        $this->expectException(AuthorizationException::class);
+        app(CheckoutCodCorrectionSlaInboxService::class)
+            ->acknowledge($alertId, (string) Str::uuid());
+    }
+
+    public function test_cod_sla48_phase_transition_rejects_stale_acknowledgement(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->codSla48Advance($c, 'proposed', 185);
+        $this->codSla48Scan();
+        $alertId = (int) DB::table('checkout_cod_correction_sla_alerts')->value('id');
+        $this->codCorrection46Action($c, 'approve');
+        $this->actor(1204);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodCorrectionSlaInboxService::class)
+            ->acknowledge($alertId, (string) Str::uuid());
+    }
+
+    public function test_cod_sla48_new_escalation_supersedes_older_unread_alert(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->codSla48Advance($c, 'proposed', 180);
+        $this->codSla48Scan();
+        $oldId = (int) DB::table('checkout_cod_correction_sla_alerts')->value('id');
+        $this->codSla48Advance($c, 'proposed', 480);
+        $this->codSla48Scan();
+        $this->actor(1204);
+        $this->expectException(DomainException::class);
+        app(CheckoutCodCorrectionSlaInboxService::class)
+            ->acknowledge($oldId, (string) Str::uuid());
+    }
+
+    public function test_cod_sla48_postgresql_prevents_receipt_mutation(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->codSla48Advance($c, 'proposed', 185);
+        $this->codSla48Scan();
+        $alert = $this->codSla48Inbox()[0];
+        app(CheckoutCodCorrectionSlaInboxService::class)
+            ->acknowledge($alert['alert_id'], (string) Str::uuid());
+        $this->expectException(QueryException::class);
+        DB::table('checkout_cod_correction_sla_receipts')->update(['actor_id' => 999]);
+    }
+
+    public function test_cod_sla48_history_retains_all_escalation_stages(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->codSla48Advance($c, 'proposed', 180);
+        $this->codSla48Scan();
+        $this->codSla48Advance($c, 'proposed', 240);
+        $this->codSla48Scan();
+        $this->actor(1204);
+        $history = app(CheckoutCodCorrectionSlaInboxService::class)
+            ->history($c['correction_key']);
+        $this->assertCount(2, $history['items']);
+        $this->assertSame('overdue', $history['items'][0]['stage']);
+        $this->assertSame('due_soon', $history['items'][1]['stage']);
+    }
+
+    public function test_cod_sla48_artisan_command_and_api_routes_registered(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->codSla48Advance($c, 'proposed', 180);
+        $this->assertSame(0, Artisan::call('cod:correction-sla', ['--limit' => 50]));
+        $this->assertDatabaseCount('checkout_cod_correction_sla_alerts', 1);
+        foreach (['cod.sla48.index', 'cod.sla48.summary', 'cod.sla48.history', 'cod.sla48.acknowledge'] as $name) {
+            $this->assertTrue(\Illuminate\Support\Facades\Route::has($name));
+        }
+    }
+
+    public function test_cod_sla48_cursor_wraps_and_deduplicates(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->codSla48Advance($c, 'proposed', 180);
+        $this->assertSame(1, $this->codSla48Scan(1)['new_alerts']);
+        $this->assertSame(0, $this->codSla48Scan(1)['scanned']);
+        $this->assertSame(0, $this->codSla48Scan(1)['new_alerts']);
+        $this->assertDatabaseCount('checkout_cod_correction_sla_alerts', 1);
+    }
+
+    public function test_cod_sla48_unprivileged_user_cannot_read_crm(): void
+    {
+        [, $c] = $this->codSla48Fixture();
+        $this->actor(999);
+        $this->expectException(AuthorizationException::class);
+        app(CheckoutCodCorrectionSlaInboxService::class)->listing();
+    }
+
+    public function test_cod_sla48_invalid_batch_limit_is_rejected(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        app(CheckoutCodCorrectionSlaScanService::class)->scan(0);
     }
 }
