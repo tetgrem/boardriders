@@ -223,3 +223,71 @@ Route::post(
         'throttle:20,1',
     ])
     ->name('cod.analytics.dashboard');
+
+
+// ============================================================
+// BOARDRIDERS BLOCK 45 — DAILY IMMUTABLE COD REPORTS
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])->prefix('v1/admin/cod/daily-reports')->group(function (): void {
+
+    \Illuminate\Support\Facades\Route::get(
+        '/',
+        [
+            \App\Http\Controllers\Api\CheckoutCodDailyReportController::class,
+            'index',
+        ]
+    )->middleware('throttle:30,1')
+        ->name('cod.daily45.index');
+
+    \Illuminate\Support\Facades\Route::post(
+        '/',
+        [
+            \App\Http\Controllers\Api\CheckoutCodDailyReportController::class,
+            'seal',
+        ]
+    )->middleware('throttle:5,1')
+        ->name('cod.daily45.seal');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/{reportKey}/verify',
+        [
+            \App\Http\Controllers\Api\CheckoutCodDailyReportController::class,
+            'verify',
+        ]
+    )->whereUuid('reportKey')
+        ->middleware('throttle:10,1')
+        ->name('cod.daily45.verify');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/{reportKey}/events',
+        [
+            \App\Http\Controllers\Api\CheckoutCodDailyReportController::class,
+            'events',
+        ]
+    )->whereUuid('reportKey')
+        ->middleware('throttle:30,1')
+        ->name('cod.daily45.events');
+
+    \Illuminate\Support\Facades\Route::post(
+        '/{reportKey}/export.csv',
+        [
+            \App\Http\Controllers\Api\CheckoutCodDailyReportController::class,
+            'csv',
+        ]
+    )->whereUuid('reportKey')
+        ->middleware('throttle:5,1')
+        ->name('cod.daily45.csv');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/{reportKey}',
+        [
+            \App\Http\Controllers\Api\CheckoutCodDailyReportController::class,
+            'show',
+        ]
+    )->whereUuid('reportKey')
+        ->middleware('throttle:30,1')
+        ->name('cod.daily45.show');
+});

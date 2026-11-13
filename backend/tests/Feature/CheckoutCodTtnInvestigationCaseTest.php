@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Services\Pricing\CheckoutCodDailyReportService;
 use App\Services\Pricing\CheckoutCodNovaPayRegisterService;
 use App\Services\Pricing\CheckoutCodNovaPayRegisterStatusService;
 use App\Services\Pricing\CheckoutCodPrivatRefetchService;
@@ -11114,5 +11115,441 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
         $this->assertTrue(
             \Illuminate\Support\Facades\Route::has('cod.analytics.dashboard')
         );
+    }
+    // ============================================================
+    // BLOCK 45 — IMMUTABLE DAILY COD REPORTS
+    // ============================================================
+
+    private function codDaily45Gate(): void
+    {
+        $this->codAnalytics44Gate();
+
+        Gate::define(
+            CheckoutCodDailyReportService::VIEW_ABILITY,
+            static fn ($u): bool => in_array(
+                (int) $u->getAuthIdentifier(),
+                [1200, 1201],
+                true
+            )
+        );
+
+        Gate::define(
+            CheckoutCodDailyReportService::SEAL_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 1200
+        );
+
+        Gate::define(
+            CheckoutCodDailyReportService::EXPORT_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 1200
+        );
+    }
+
+    private function codDaily45Fixture(
+        bool $withCase = false,
+        bool $withRegister = false
+    ): array {
+        [, $post, $rows] = $this->novapayRegister39Source();
+
+        if ($withRegister) {
+            $this->novapayRegister39Capture($post, $rows);
+        }
+
+        $case = null;
+
+        if ($withCase) {
+            $this->codCase42Gate();
+            $this->actor(1200);
+            $case = $this->codCase42Open($post);
+        }
+
+        $day = CarbonImmutable::now('UTC')->toDateString();
+
+        // Advance one calendar day only after creating the bank fixtures.
+        CarbonImmutable::setTestNow(
+            CarbonImmutable::now('UTC')->addDay()
+        );
+
+        $this->codDaily45Gate();
+
+        return [
+            'day' => $day,
+            'post' => $post,
+            'case' => $case,
+        ];
+    }
+
+    private function codDaily45Seal(
+        string $day,
+        ?string $operationKey = null
+    ): array {
+        return app(CheckoutCodDailyReportService::class)->seal(
+            $day,
+            $operationKey ?? (string) Str::uuid()
+        );
+    }
+
+    public function test_cod_daily45_seals_previous_day_with_precise_bank_sums(): void
+    {
+        $f = $this->codDaily45Fixture();
+        $r = $this->codDaily45Seal($f['day']);
+
+        $this->assertSame($f['day'], $r['report_date']);
+        $this->assertSame(1, $r['schema_version']);
+        $this->assertSame(
+            680,
+            $r['payload']['financial']['posted_bank_minor']
+        );
+        $this->assertSame(
+            2000,
+            $r['payload']['financial']['journal_gross_minor']
+        );
+        $this->assertSame(
+            1320,
+            $r['payload']['financial']['journal_fee_minor']
+        );
+        $this->assertSame(
+            'awaiting_register_claims',
+            $r['reconciliation']['status']
+        );
+        $this->assertFalse($r['customer_payment_confirmed']);
+
+        $this->assertDatabaseCount('checkout_cod_daily_reports', 1);
+        $this->assertDatabaseCount('checkout_cod_daily_report_events', 1);
+    }
+
+    public function test_cod_daily45_valid_register_still_not_a_verified_customer_payment(): void
+    {
+        $f = $this->codDaily45Fixture(false, true);
+        $r = $this->codDaily45Seal($f['day']);
+
+        $this->assertSame(
+            'internally_consistent_unverified',
+            $r['reconciliation']['status']
+        );
+        $this->assertSame(
+            1,
+            $r['payload']['financial']['register_claims_count']
+        );
+        $this->assertFalse($r['cod_paid']);
+    }
+
+    public function test_cod_daily45_same_seal_uuid_replays_original_snapshot(): void
+    {
+        $f = $this->codDaily45Fixture();
+        $op = (string) Str::uuid();
+
+        $first = $this->codDaily45Seal($f['day'], $op);
+        $replay = $this->codDaily45Seal($f['day'], $op);
+
+        $this->assertSame(
+            $first['report_key'],
+            $replay['report_key']
+        );
+        $this->assertSame(
+            $first['payload_hmac'],
+            $replay['payload_hmac']
+        );
+        $this->assertFalse($first['idempotent_replay']);
+        $this->assertTrue($replay['idempotent_replay']);
+        $this->assertDatabaseCount('checkout_cod_daily_report_events', 1);
+    }
+
+    public function test_cod_daily45_different_uuid_cannot_overwrite_sealed_day(): void
+    {
+        $f = $this->codDaily45Fixture();
+        $this->codDaily45Seal($f['day']);
+
+        $this->expectException(DomainException::class);
+
+        $this->codDaily45Seal($f['day']);
+    }
+
+    public function test_cod_daily45_seal_uuid_is_bound_to_day(): void
+    {
+        $f = $this->codDaily45Fixture();
+        $op = (string) Str::uuid();
+
+        $this->codDaily45Seal($f['day'], $op);
+
+        $otherDay = CarbonImmutable::parse($f['day'])
+            ->subDay()
+            ->toDateString();
+
+        $this->expectException(DomainException::class);
+
+        $this->codDaily45Seal($otherDay, $op);
+    }
+
+    public function test_cod_daily45_cannot_seal_unfinished_utc_day(): void
+    {
+        $this->codDaily45Fixture();
+        $today = CarbonImmutable::now('UTC')->toDateString();
+
+        $this->expectException(DomainException::class);
+
+        $this->codDaily45Seal($today);
+    }
+
+    public function test_cod_daily45_past_empty_day_is_explicitly_empty(): void
+    {
+        $f = $this->codDaily45Fixture();
+
+        $emptyDay = CarbonImmutable::parse($f['day'])
+            ->subDay()
+            ->toDateString();
+
+        $r = $this->codDaily45Seal($emptyDay);
+
+        $this->assertSame(
+            0,
+            $r['payload']['financial']['postings_count']
+        );
+        $this->assertSame(
+            'no_bank_postings',
+            $r['reconciliation']['status']
+        );
+    }
+
+    public function test_cod_daily45_seal_permission_is_separate_from_view(): void
+    {
+        $f = $this->codDaily45Fixture();
+
+        Gate::define(
+            CheckoutCodDailyReportService::SEAL_ABILITY,
+            static fn ($u): bool => false
+        );
+
+        $this->expectException(AuthorizationException::class);
+
+        $this->codDaily45Seal($f['day']);
+    }
+
+    public function test_cod_daily45_show_requires_daily_view_permission(): void
+    {
+        $f = $this->codDaily45Fixture();
+        $r = $this->codDaily45Seal($f['day']);
+
+        Gate::define(
+            CheckoutCodDailyReportService::VIEW_ABILITY,
+            static fn ($u): bool => false
+        );
+
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodDailyReportService::class)
+            ->show($r['report_key']);
+    }
+
+    public function test_cod_daily45_verify_integrity_and_unchanged_live_projection(): void
+    {
+        $f = $this->codDaily45Fixture();
+        $r = $this->codDaily45Seal($f['day']);
+
+        $check = app(CheckoutCodDailyReportService::class)
+            ->verify($r['report_key'], true);
+
+        $this->assertTrue($check['integrity']['valid']);
+        $this->assertTrue($check['integrity']['report_hash_valid']);
+        $this->assertTrue($check['integrity']['seal_event_valid']);
+        $this->assertSame(
+            1,
+            $check['integrity']['events_checked']
+        );
+        $this->assertFalse($check['live_projection_differs']);
+    }
+
+    public function test_cod_daily45_live_case_change_is_not_archive_tampering(): void
+    {
+        $f = $this->codDaily45Fixture(true);
+        $r = $this->codDaily45Seal($f['day']);
+
+        $this->codCase42Action(
+            $f['case'],
+            'claim',
+            'start_work'
+        );
+
+        $this->codDaily45Gate();
+
+        $check = app(CheckoutCodDailyReportService::class)
+            ->verify($r['report_key'], true);
+
+        $this->assertTrue($check['integrity']['valid']);
+        $this->assertTrue($check['live_projection_differs']);
+        $this->assertTrue(
+            $check['live_difference_is_not_archive_tampering']
+        );
+    }
+
+    public function test_cod_daily45_csv_is_from_signed_snapshot_and_audited(): void
+    {
+        $f = $this->codDaily45Fixture();
+        $r = $this->codDaily45Seal($f['day']);
+        $op = (string) Str::uuid();
+
+        $service = app(CheckoutCodDailyReportService::class);
+
+        $first = $service->exportCsv($r['report_key'], $op);
+        $again = $service->exportCsv($r['report_key'], $op);
+
+        $this->assertFalse($first['idempotent_replay']);
+        $this->assertTrue($again['idempotent_replay']);
+        $this->assertSame($first['csv'], $again['csv']);
+
+        $this->assertStringContainsString(
+            'financial,posted_bank_minor,680,UAH_minor',
+            $first['csv']
+        );
+
+        $this->assertStringNotContainsString(
+            'Петренко',
+            $first['csv']
+        );
+
+        $this->assertDatabaseCount(
+            'checkout_cod_daily_report_events',
+            2
+        );
+    }
+
+    public function test_cod_daily45_export_permission_is_independent_of_view(): void
+    {
+        $f = $this->codDaily45Fixture();
+        $r = $this->codDaily45Seal($f['day']);
+
+        Gate::define(
+            CheckoutCodDailyReportService::EXPORT_ABILITY,
+            static fn ($u): bool => false
+        );
+
+        $this->expectException(AuthorizationException::class);
+
+        app(CheckoutCodDailyReportService::class)->exportCsv(
+            $r['report_key'],
+            (string) Str::uuid()
+        );
+    }
+
+    public function test_cod_daily45_export_uuid_cannot_be_used_for_different_intent(): void
+    {
+        $f = $this->codDaily45Fixture();
+        $r = $this->codDaily45Seal($f['day']);
+        $op = (string) Str::uuid();
+
+        app(CheckoutCodDailyReportService::class)->exportCsv(
+            $r['report_key'],
+            $op
+        );
+
+        $this->actor(1201);
+
+        Gate::define(
+            CheckoutCodDailyReportService::EXPORT_ABILITY,
+            static fn ($u): bool => in_array(
+                (int) $u->getAuthIdentifier(),
+                [1200, 1201],
+                true
+            )
+        );
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutCodDailyReportService::class)->exportCsv(
+            $r['report_key'],
+            $op
+        );
+    }
+
+    public function test_cod_daily45_report_and_event_history_are_paginated(): void
+    {
+        $f = $this->codDaily45Fixture();
+        $r = $this->codDaily45Seal($f['day']);
+
+        $service = app(CheckoutCodDailyReportService::class);
+
+        $service->exportCsv($r['report_key'], (string) Str::uuid());
+        $service->exportCsv($r['report_key'], (string) Str::uuid());
+
+        $page = $service->history($r['report_key'], null, 2);
+
+        $this->assertCount(2, $page['items']);
+        $this->assertNotNull($page['next_before_id']);
+
+        $older = $service->history(
+            $r['report_key'],
+            $page['next_before_id'],
+            2
+        );
+
+        $this->assertCount(1, $older['items']);
+        $this->assertSame(
+            'sealed',
+            $older['items'][0]['event_kind']
+        );
+
+        $list = $service->listing();
+
+        $this->assertSame(
+            $r['report_key'],
+            $list['items'][0]['report_key']
+        );
+    }
+
+    public function test_cod_daily45_database_rejects_snapshot_update(): void
+    {
+        $f = $this->codDaily45Fixture();
+        $r = $this->codDaily45Seal($f['day']);
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_daily_reports')
+            ->where('report_key', $r['report_key'])
+            ->update([
+                'payload_hmac' => str_repeat('f', 64),
+            ]);
+    }
+
+    public function test_cod_daily45_database_rejects_audit_delete(): void
+    {
+        $f = $this->codDaily45Fixture();
+        $this->codDaily45Seal($f['day']);
+
+        $this->expectException(QueryException::class);
+
+        DB::table('checkout_cod_daily_report_events')->delete();
+    }
+
+    public function test_cod_daily45_does_not_change_order_payment_status(): void
+    {
+        $f = $this->codDaily45Fixture();
+        $r = $this->codDaily45Seal($f['day']);
+
+        $this->assertSame(
+            'pending',
+            DB::table('orders')
+                ->where('order_key', $this->orderKey)
+                ->value('payment_status')
+        );
+
+        $this->assertFalse($r['orders_payment_status_changed']);
+        $this->assertFalse(
+            $r['automatic_payment_posting_allowed']
+        );
+    }
+
+    public function test_cod_daily45_routes_are_registered(): void
+    {
+        foreach ([
+                     'cod.daily45.index',
+                     'cod.daily45.seal',
+                     'cod.daily45.show',
+                     'cod.daily45.verify',
+                     'cod.daily45.events',
+                     'cod.daily45.csv',
+                 ] as $name) {
+            $this->assertTrue(
+                \Illuminate\Support\Facades\Route::has($name)
+            );
+        }
     }
 }
