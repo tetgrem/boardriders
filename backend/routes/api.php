@@ -457,3 +457,39 @@ Route::post(
         ->middleware('throttle:20,1')
         ->name('cod.sla48.acknowledge');
 });
+
+// ============================================================
+// BOARDRIDERS BLOCK 49 — UNIFIED COD FINANCE CENTER
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])->prefix('v1/admin/cod/finance-center')->group(function (): void {
+
+    \Illuminate\Support\Facades\Route::get(
+        '/queue',
+        [
+            \App\Http\Controllers\Api\CheckoutCodFinanceCenterController::class,
+            'queue',
+        ]
+    )->middleware('throttle:30,1')
+        ->name('cod.finance49.queue');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/summary',
+        [
+            \App\Http\Controllers\Api\CheckoutCodFinanceCenterController::class,
+            'summary',
+        ]
+    )->middleware('throttle:30,1')
+        ->name('cod.finance49.summary');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/overview',
+        [
+            \App\Http\Controllers\Api\CheckoutCodFinanceCenterController::class,
+            'overview',
+        ]
+    )->middleware('throttle:10,1')
+        ->name('cod.finance49.overview');
+});

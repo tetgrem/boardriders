@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Services\Pricing\CheckoutCodFinanceCenterService;
 use App\Services\Pricing\CheckoutCodCorrectionSlaScanService;
 use App\Services\Pricing\CheckoutCodCorrectionSlaInboxService;
 use App\Services\Pricing\CheckoutCodDailyMonitorService;
@@ -12547,5 +12548,486 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
     {
         $this->expectException(InvalidArgumentException::class);
         app(CheckoutCodCorrectionSlaScanService::class)->scan(0);
+    }
+
+    // ============================================================
+    // BLOCK 49 — UNIFIED FINANCE CENTER
+    // ============================================================
+
+    private function codFinance49Gate(): void
+    {
+        $this->codSla48Gate();
+
+        $viewers = static fn ($u): bool => in_array(
+            (int) $u->getAuthIdentifier(),
+            [1204, 1205, 1206],
+            true
+        );
+
+        Gate::define(
+            CheckoutCodFinanceCenterService::VIEW_ABILITY,
+            $viewers
+        );
+
+        Gate::define(
+            CheckoutCodFinanceCenterService::METRICS_ABILITY,
+            static fn ($u): bool =>
+                (int) $u->getAuthIdentifier() === 1206
+        );
+
+        Gate::define(
+            CheckoutCodDailyMonitorService::VIEW_ABILITY,
+            static fn ($u): bool => in_array(
+                (int) $u->getAuthIdentifier(),
+                [1204, 1206],
+                true
+            )
+        );
+
+        Gate::define(
+            CheckoutCodAnalyticsService::VIEW_ABILITY,
+            static fn ($u): bool =>
+                (int) $u->getAuthIdentifier() === 1206
+        );
+
+        Gate::define(
+            'cod.operations.analytics.view',
+            static fn ($u): bool =>
+                (int) $u->getAuthIdentifier() === 1206
+        );
+    }
+
+    private function codFinance49Fixture(int $minutes = 480): array
+    {
+        [$f, $correction] = $this->codSla48Fixture();
+
+        $this->codFinance49Gate();
+
+        $this->codSla48Advance(
+            $correction,
+            'proposed',
+            $minutes
+        );
+
+        $this->codSla48Scan();
+        $this->codMonitor47Scan();
+
+        return [$f, $correction];
+    }
+    public function test_cod_finance49_unified_queue_contains_monitor_and_management_sla(): void
+    {
+        $this->codFinance49Fixture();
+
+        $this->actor(1206);
+
+        $data = app(CheckoutCodFinanceCenterService::class)
+            ->queue();
+
+        $sources = array_column(
+            $data['items'],
+            'source'
+        );
+
+        $this->assertContains('monitor', $sources);
+        $this->assertContains('sla', $sources);
+
+        $this->assertTrue(
+            $data['actions_must_use_source_workflow']
+        );
+
+        $this->assertTrue(
+            $data['snapshot_is_live']
+        );
+    }
+
+    public function test_cod_finance49_review_team_does_not_see_management_sla(): void
+    {
+        $this->codFinance49Fixture();
+
+        $this->actor(1204);
+
+        $sources = array_column(
+            app(CheckoutCodFinanceCenterService::class)
+                ->queue()['items'],
+            'source'
+        );
+
+        $this->assertContains('monitor', $sources);
+        $this->assertNotContains('sla', $sources);
+    }
+
+    public function test_cod_finance49_publication_team_does_not_see_review_or_management(): void
+    {
+        $this->codFinance49Fixture();
+
+        $this->actor(1205);
+
+        $this->assertSame(
+            [],
+            app(CheckoutCodFinanceCenterService::class)
+                ->queue()['items']
+        );
+    }
+
+    public function test_cod_finance49_source_filter_keeps_only_sla(): void
+    {
+        $this->codFinance49Fixture();
+
+        $this->actor(1206);
+
+        $items = app(CheckoutCodFinanceCenterService::class)
+            ->queue('sla')['items'];
+
+        $this->assertCount(1, $items);
+        $this->assertSame('sla', $items[0]['source']);
+        $this->assertSame('overdue_4h', $items[0]['code']);
+        $this->assertSame(
+            'finance_management',
+            $items[0]['target_role']
+        );
+    }
+
+    public function test_cod_finance49_severity_filter_separates_sla_and_monitor(): void
+    {
+        $this->codFinance49Fixture(480);
+
+        $this->actor(1206);
+
+        $critical = app(CheckoutCodFinanceCenterService::class)
+            ->queue('all', 'critical');
+
+        $this->assertSame(
+            'sla',
+            $critical['items'][0]['source']
+        );
+
+        $this->assertNotContains(
+            'monitor',
+            array_column($critical['items'], 'source')
+        );
+
+        $warning = app(CheckoutCodFinanceCenterService::class)
+            ->queue('all', 'warning');
+
+        $this->assertSame(
+            'monitor',
+            $warning['items'][0]['source']
+        );
+    }
+
+    public function test_cod_finance49_global_priority_orders_critical_before_warning(): void
+    {
+        $this->codFinance49Fixture(480);
+
+        $this->actor(1206);
+
+        $items = app(CheckoutCodFinanceCenterService::class)
+            ->queue()['items'];
+
+        $this->assertGreaterThanOrEqual(
+            2,
+            count($items)
+        );
+
+        $this->assertSame(
+            'critical',
+            $items[0]['severity']
+        );
+
+        $this->assertSame(
+            'warning',
+            $items[count($items) - 1]['severity']
+        );
+    }
+
+    public function test_cod_finance49_cursor_paginates_distinct_sources(): void
+    {
+        $this->codFinance49Fixture();
+
+        $this->actor(1206);
+
+        $service = app(CheckoutCodFinanceCenterService::class);
+
+        $first = $service->queue(
+            'all',
+            'all',
+            false,
+            1
+        );
+
+        $this->assertCount(
+            1,
+            $first['items']
+        );
+
+        $this->assertNotNull(
+            $first['next_cursor']
+        );
+
+        $second = $service->queue(
+            'all',
+            'all',
+            false,
+            1,
+            $first['next_cursor']
+        );
+
+        $this->assertCount(
+            1,
+            $second['items']
+        );
+
+        $this->assertNotSame(
+            $first['items'][0]['source']
+            . ':'
+            . $first['items'][0]['source_id'],
+            $second['items'][0]['source']
+            . ':'
+            . $second['items'][0]['source_id']
+        );
+    }
+
+    public function test_cod_finance49_cursor_rejects_changed_filter(): void
+    {
+        $this->codFinance49Fixture();
+
+        $this->actor(1206);
+
+        $service = app(CheckoutCodFinanceCenterService::class);
+
+        $first = $service->queue(
+            'all',
+            'all',
+            false,
+            1
+        );
+
+        $this->assertNotNull(
+            $first['next_cursor']
+        );
+
+        $this->expectException(
+            InvalidArgumentException::class
+        );
+
+        $service->queue(
+            'sla',
+            'all',
+            false,
+            1,
+            $first['next_cursor']
+        );
+    }
+
+    public function test_cod_finance49_summary_uses_only_visible_sources(): void
+    {
+        $this->codFinance49Fixture();
+
+        $this->actor(1206);
+
+        $manager = app(CheckoutCodFinanceCenterService::class)
+            ->summary();
+
+        $this->assertSame(
+            1,
+            $manager['by_source']['monitor']
+        );
+
+        $this->assertSame(
+            1,
+            $manager['by_source']['sla']
+        );
+
+        $this->assertSame(
+            1,
+            $manager['by_severity']['critical']
+        );
+
+        $this->assertSame(
+            1,
+            $manager['by_severity']['warning']
+        );
+
+        $this->actor(1204);
+
+        $reviewer = app(CheckoutCodFinanceCenterService::class)
+            ->summary();
+
+        $this->assertSame(
+            0,
+            $reviewer['by_source']['sla']
+        );
+    }
+
+    public function test_cod_finance49_management_overview_reuses_block44_analytics(): void
+    {
+        $this->codFinance49Fixture();
+
+        $this->actor(1206);
+
+        $result = app(CheckoutCodFinanceCenterService::class)
+            ->overview(2);
+
+        $this->assertArrayHasKey(
+            'financial',
+            $result
+        );
+
+        $this->assertArrayHasKey(
+            'staff',
+            $result
+        );
+
+        $this->assertArrayHasKey(
+            'notifications',
+            $result
+        );
+
+        $this->assertArrayHasKey(
+            'risk_summary',
+            $result
+        );
+
+        $this->assertCount(
+            2,
+            $result['top_risks']
+        );
+
+        $this->assertTrue(
+            $result['financial_data_are_not_proof_of_customer_payment']
+        );
+    }
+
+    public function test_cod_finance49_review_team_cannot_see_management_financial_overview(): void
+    {
+        $this->codFinance49Fixture();
+
+        $this->actor(1204);
+
+        $this->expectException(
+            AuthorizationException::class
+        );
+
+        app(CheckoutCodFinanceCenterService::class)
+            ->overview();
+    }
+
+    public function test_cod_finance49_unprivileged_user_cannot_access_queue(): void
+    {
+        $this->codFinance49Fixture();
+
+        $this->actor(999);
+
+        $this->expectException(
+            AuthorizationException::class
+        );
+
+        app(CheckoutCodFinanceCenterService::class)
+            ->queue();
+    }
+
+    public function test_cod_finance49_malformed_cursor_is_rejected(): void
+    {
+        $this->codFinance49Fixture();
+
+        $this->actor(1206);
+
+        $this->expectException(
+            InvalidArgumentException::class
+        );
+
+        app(CheckoutCodFinanceCenterService::class)
+            ->queue(
+                'all',
+                'all',
+                false,
+                20,
+                'invalid'
+            );
+    }
+
+    public function test_cod_finance49_invalid_paging_limit_is_rejected(): void
+    {
+        $this->codFinance49Gate();
+
+        $this->actor(1206);
+
+        $this->expectException(
+            InvalidArgumentException::class
+        );
+
+        app(CheckoutCodFinanceCenterService::class)
+            ->queue(
+                'all',
+                'all',
+                false,
+                101
+            );
+    }
+
+    public function test_cod_finance49_clean_monitor_signals_not_in_risk_queue(): void
+    {
+        $this->codMonitor47Fixture(false);
+
+        $this->codFinance49Gate();
+
+        $this->codMonitor47Scan();
+
+        $this->actor(1206);
+
+        $queue = app(CheckoutCodFinanceCenterService::class)
+            ->queue('monitor');
+
+        $this->assertSame(
+            [],
+            $queue['items']
+        );
+    }
+
+    public function test_cod_finance49_dashboard_does_not_mutate_sources(): void
+    {
+        $this->codFinance49Fixture();
+
+        $this->actor(1206);
+
+        $before = [
+            DB::table('checkout_cod_daily_reports')->count(),
+            DB::table('checkout_cod_daily_corrections')->count(),
+            DB::table('checkout_cod_daily_monitor_signals')->count(),
+            DB::table('checkout_cod_correction_sla_alerts')->count(),
+            DB::table('checkout_cod_correction_sla_receipts')->count(),
+        ];
+
+        $center = app(CheckoutCodFinanceCenterService::class);
+
+        $center->queue();
+        $center->summary();
+        $center->overview();
+
+        $after = [
+            DB::table('checkout_cod_daily_reports')->count(),
+            DB::table('checkout_cod_daily_corrections')->count(),
+            DB::table('checkout_cod_daily_monitor_signals')->count(),
+            DB::table('checkout_cod_correction_sla_alerts')->count(),
+            DB::table('checkout_cod_correction_sla_receipts')->count(),
+        ];
+
+        $this->assertSame(
+            $before,
+            $after
+        );
+    }
+
+    public function test_cod_finance49_routes_registered(): void
+    {
+        foreach ([
+                     'cod.finance49.queue',
+                     'cod.finance49.summary',
+                     'cod.finance49.overview',
+                 ] as $name) {
+            $this->assertTrue(
+                \Illuminate\Support\Facades\Route::has($name)
+            );
+        }
     }
 }
