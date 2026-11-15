@@ -2,6 +2,8 @@
 
 namespace Tests\Feature;
 
+use App\Services\Pricing\CheckoutCodSettlementSealService;
+
 use App\Services\Pricing\CheckoutCodFinanceCenterService;
 use App\Services\Pricing\CheckoutCodCorrectionSlaScanService;
 use App\Services\Pricing\CheckoutCodCorrectionSlaInboxService;
@@ -13029,5 +13031,243 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
                 \Illuminate\Support\Facades\Route::has($name)
             );
         }
+
+    }
+    // ============================================================
+    // BLOCK 50 — IMMUTABLE INTERNAL COD SETTLEMENT ALLOCATIONS
+    // ============================================================
+
+    private function codSeal50Gate(): void
+    {
+        Gate::define(CheckoutCodTtnInvestigationStatusService::VIEW_ABILITY,
+            static fn ($u): bool => in_array((int) $u->getAuthIdentifier(), [5001, 5002, 3901, 1200], true));
+        Gate::define(CheckoutCodSettlementSealService::VIEW_ABILITY,
+            static fn ($u): bool => in_array((int) $u->getAuthIdentifier(), [5001, 5002], true));
+        Gate::define(CheckoutCodSettlementSealService::SEAL_ABILITY,
+            static fn ($u): bool => in_array((int) $u->getAuthIdentifier(), [5001, 5002], true));
+    }
+
+    private function codSeal50Fixture(bool $multi = false, bool $capture = true): array
+    {
+        [$source, $post, $rows] = $this->novapayRegister39Source($multi);
+        if ($capture) {
+            $this->novapayRegister39Capture($post, $rows);
+        }
+        $this->codSeal50Gate();
+        $this->actor(5001);
+        return [$source, $post, $rows];
+    }
+
+    private function codSeal50Execute(array $post, ?string $operation = null): array
+    {
+        return app(CheckoutCodSettlementSealService::class)->seal(
+            $post['operation_key'], $operation ?? (string) Str::uuid()
+        );
+    }
+
+    public function test_cod_seal50_preview_requires_register_capture(): void
+    {
+        [, $post] = $this->codSeal50Fixture(false, false);
+        $r = app(CheckoutCodSettlementSealService::class)->preview($post['operation_key']);
+        $this->assertSame('awaiting_operator_register', $r['status']);
+        $this->assertFalse($r['eligible_for_internal_seal']);
+        $this->assertFalse($r['cod_paid']);
+    }
+
+    public function test_cod_seal50_preview_checks_exact_minor_units(): void
+    {
+        [, $post] = $this->codSeal50Fixture();
+        $r = app(CheckoutCodSettlementSealService::class)->preview($post['operation_key']);
+        $this->assertSame('ready_for_internal_allocation_seal', $r['status']);
+        $this->assertTrue($r['eligible_for_internal_seal']);
+        $this->assertSame(2000, $r['totals']['gross_minor']);
+        $this->assertSame(1320, $r['totals']['fee_minor']);
+        $this->assertSame(680, $r['totals']['bank_minor']);
+        $this->assertFalse($r['novapay_origin_authenticated']);
+    }
+
+    public function test_cod_seal50_single_order_seals_without_paid(): void
+    {
+        [, $post] = $this->codSeal50Fixture();
+        $r = $this->codSeal50Execute($post);
+        $this->assertSame('sealed_awaiting_authenticated_collection', $r['status']);
+        $this->assertSame(1, $r['totals']['orders_count']);
+        $this->assertCount(1, $r['lines']);
+        $this->assertTrue($r['internal_allocation_sealed']);
+        $this->assertFalse($r['customer_payment_confirmed']);
+        $this->assertFalse($r['cod_paid']);
+        $this->assertSame('pending', DB::table('orders')->where('order_key', $this->orderKey)->value('payment_status'));
+        $this->assertDatabaseCount('checkout_cod_settlement_seals', 1);
+        $this->assertDatabaseCount('checkout_cod_settlement_seal_lines', 1);
+    }
+
+    public function test_cod_seal50_two_order_batch_is_atomic(): void
+    {
+        [, $post] = $this->codSeal50Fixture(true);
+        $r = $this->codSeal50Execute($post);
+        $this->assertSame(2, $r['totals']['orders_count']);
+        $this->assertSame(4000, $r['totals']['gross_minor']);
+        $this->assertSame(2640, $r['totals']['fee_minor']);
+        $this->assertSame(1360, $r['totals']['bank_minor']);
+        $this->assertDatabaseCount('checkout_cod_settlement_seal_lines', 2);
+        $this->assertSame(2, DB::table('orders')->where('payment_status', 'pending')->count());
+    }
+
+    public function test_cod_seal50_same_uuid_replays_exact_snapshot(): void
+    {
+        [, $post] = $this->codSeal50Fixture();
+        $op = (string) Str::uuid();
+        $a = $this->codSeal50Execute($post, $op);
+        $b = $this->codSeal50Execute($post, $op);
+        $this->assertFalse($a['idempotent_replay']);
+        $this->assertTrue($b['idempotent_replay']);
+        $this->assertSame($a['seal_key'], $b['seal_key']);
+        $this->assertSame($a['snapshot_hmac'], $b['snapshot_hmac']);
+        $this->assertDatabaseCount('checkout_cod_settlement_seals', 1);
+    }
+
+    public function test_cod_seal50_different_uuid_cannot_double_seal_posting(): void
+    {
+        [, $post] = $this->codSeal50Fixture();
+        $this->codSeal50Execute($post);
+        $this->expectException(DomainException::class);
+        $this->codSeal50Execute($post);
+    }
+
+    public function test_cod_seal50_uuid_cannot_be_replayed_by_other_actor(): void
+    {
+        [, $post] = $this->codSeal50Fixture();
+        $op = (string) Str::uuid();
+        $this->codSeal50Execute($post, $op);
+        $this->actor(5002);
+        $this->expectException(DomainException::class);
+        $this->codSeal50Execute($post, $op);
+    }
+
+    public function test_cod_seal50_creator_must_have_separate_gate(): void
+    {
+        [, $post] = $this->codSeal50Fixture();
+        Gate::define(CheckoutCodSettlementSealService::SEAL_ABILITY,
+            static fn ($u): bool => false);
+        $this->expectException(AuthorizationException::class);
+        $this->codSeal50Execute($post);
+    }
+
+    public function test_cod_seal50_capture_operator_cannot_seal_own_claim(): void
+    {
+        [, $post] = $this->codSeal50Fixture();
+        Gate::define(CheckoutCodSettlementSealService::SEAL_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 3901);
+        $this->actor(3901);
+        $this->expectException(DomainException::class);
+        $this->codSeal50Execute($post);
+    }
+
+    public function test_cod_seal50_bank_poster_cannot_seal_own_posting(): void
+    {
+        [, $post] = $this->codSeal50Fixture();
+        $poster = (int) DB::table('checkout_cod_bank_receipt_postings')
+            ->where('operation_key', $post['operation_key'])->value('posted_by');
+        Gate::define(CheckoutCodTtnInvestigationStatusService::VIEW_ABILITY,
+            static fn ($u): bool => true);
+        Gate::define(CheckoutCodSettlementSealService::SEAL_ABILITY,
+            static fn ($u): bool => true);
+        $this->actor($poster);
+        $this->expectException(DomainException::class);
+        $this->codSeal50Execute($post);
+    }
+
+    public function test_cod_seal50_negative_bank_refetch_blocks_allocation(): void
+    {
+        [$source, $post] = $this->codSeal50Fixture();
+        $this->refetchRisk37Negative('single', $source);
+        $this->actor(5001);
+        $preview = app(CheckoutCodSettlementSealService::class)->preview($post['operation_key']);
+        $this->assertFalse($preview['eligible_for_internal_seal']);
+        $this->assertContains('bank_source_disputed_or_held', $preview['issues']);
+        $this->expectException(DomainException::class);
+        $this->codSeal50Execute($post);
+    }
+
+    public function test_cod_seal50_later_gateway_reversal_blocks_new_seal(): void
+    {
+        [, $post] = $this->codSeal50Fixture();
+        $this->codCorrection46AddGatewayReversal();
+        $this->actor(5001);
+        $this->expectException(DomainException::class);
+        $this->codSeal50Execute($post);
+    }
+
+    public function test_cod_seal50_reversal_after_seal_preserves_history_and_flags_risk(): void
+    {
+        [, $post] = $this->codSeal50Fixture();
+        $sealed = $this->codSeal50Execute($post);
+        $this->codCorrection46AddGatewayReversal();
+        $this->actor(5001);
+        $r = app(CheckoutCodSettlementSealService::class)->show($sealed['seal_key']);
+        $this->assertTrue($r['integrity_valid']);
+        $this->assertTrue($r['current_financial_risk']);
+        $this->assertFalse($r['cod_paid']);
+        $this->assertDatabaseCount('checkout_cod_settlement_seals', 1);
+    }
+
+    public function test_cod_seal50_status_read_verifies_signature_and_lines(): void
+    {
+        [, $post] = $this->codSeal50Fixture();
+        $sealed = $this->codSeal50Execute($post);
+        $svc = app(CheckoutCodSettlementSealService::class);
+        $r = $svc->show($sealed['seal_key']);
+        $this->assertTrue($r['integrity_valid']);
+        $this->assertSame($sealed['lines'], $r['lines']);
+        $p = $svc->preview($post['operation_key']);
+        $this->assertSame('sealed_awaiting_authenticated_collection', $p['status']);
+        $this->assertTrue($p['integrity_valid']);
+    }
+
+    public function test_cod_seal50_postgresql_immutable_header(): void
+    {
+        [, $post] = $this->codSeal50Fixture();
+        $this->codSeal50Execute($post);
+        $this->expectException(QueryException::class);
+        DB::table('checkout_cod_settlement_seals')
+            ->update(['snapshot_hmac' => str_repeat('a', 64)]);
+    }
+
+    public function test_cod_seal50_postgresql_immutable_lines(): void
+    {
+        [, $post] = $this->codSeal50Fixture();
+        $this->codSeal50Execute($post);
+        $this->expectException(QueryException::class);
+        DB::table('checkout_cod_settlement_seal_lines')->delete();
+    }
+
+    public function test_cod_seal50_api_route_auth_and_registration(): void
+    {
+        foreach (['cod.seal50.preview', 'cod.seal50.create', 'cod.seal50.show'] as $name) {
+            $route = \Illuminate\Support\Facades\Route::getRoutes()->getByName($name);
+            $this->assertNotNull($route);
+            $this->assertContains('auth:sanctum', $route->gatherMiddleware());
+        }
+    }
+
+    public function test_cod_seal50_http_success_returns_unpaid_snapshot(): void
+    {
+        [, $post] = $this->codSeal50Fixture();
+        $this->actingAs(new GenericUser(['id' => 5001]), 'sanctum');
+        $this->postJson('/api/v1/admin/cod/settlement-seals', [
+            'posting_key' => $post['operation_key'],
+            'operation_key' => (string) Str::uuid(),
+        ])->assertOk()->assertJsonPath('cod_paid', false)
+            ->assertJsonPath('totals.bank_minor', 680)
+            ->assertJsonPath('internal_allocation_sealed', true);
+    }
+
+    public function test_cod_seal50_http_bad_uuid_returns_422(): void
+    {
+        $this->codSeal50Gate();
+        $this->actingAs(new GenericUser(['id' => 5001]), 'sanctum');
+        $this->postJson('/api/v1/admin/cod/settlement-seals', [
+            'posting_key' => 'bad', 'operation_key' => (string) Str::uuid(),
+        ])->assertStatus(422);
     }
 }

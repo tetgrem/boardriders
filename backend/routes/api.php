@@ -493,3 +493,40 @@ Route::post(
     )->middleware('throttle:10,1')
         ->name('cod.finance49.overview');
 });
+
+// ============================================================
+// BOARDRIDERS BLOCK 50 — INTERNAL COD SETTLEMENT ALLOCATION SEALS
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])->prefix('v1/admin/cod/settlement-seals')->group(function (): void {
+
+    \Illuminate\Support\Facades\Route::get(
+        '/preview',
+        [
+            \App\Http\Controllers\Api\CheckoutCodSettlementSealController::class,
+            'preview',
+        ]
+    )->middleware('throttle:30,1')
+        ->name('cod.seal50.preview');
+
+    \Illuminate\Support\Facades\Route::post(
+        '/',
+        [
+            \App\Http\Controllers\Api\CheckoutCodSettlementSealController::class,
+            'seal',
+        ]
+    )->middleware('throttle:5,1')
+        ->name('cod.seal50.create');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/{sealKey}',
+        [
+            \App\Http\Controllers\Api\CheckoutCodSettlementSealController::class,
+            'show',
+        ]
+    )->whereUuid('sealKey')
+        ->middleware('throttle:30,1')
+        ->name('cod.seal50.show');
+});
