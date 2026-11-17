@@ -35,3 +35,9 @@ Schedule::command('cod:daily-monitor --limit=50')
 Schedule::command('cod:correction-sla --limit=50')
     ->everyFiveMinutes()
     ->withoutOverlapping(15);
+
+
+// BLOCK 51 — Project existing Nova Poshta TTN observations into lifecycle states.
+Schedule::command('cod:ttn-lifecycle --limit=50')
+    ->everyFiveMinutes()
+    ->withoutOverlapping(15);

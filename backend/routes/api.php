@@ -530,3 +530,51 @@ Route::post(
         ->middleware('throttle:30,1')
         ->name('cod.seal50.show');
 });
+
+// ============================================================
+// BOARDRIDERS BLOCK 51 — NOVA POSHTA TTN LIFECYCLE
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])->prefix('v1/admin/cod/ttn-lifecycle')->group(function (): void {
+
+    \Illuminate\Support\Facades\Route::get(
+        '/queue',
+        [
+            \App\Http\Controllers\Api\CheckoutCodTtnLifecycleController::class,
+            'queue',
+        ]
+    )->middleware('throttle:30,1')
+        ->name('cod.lifecycle51.queue');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/{trackingKey}',
+        [
+            \App\Http\Controllers\Api\CheckoutCodTtnLifecycleController::class,
+            'status',
+        ]
+    )->whereUuid('trackingKey')
+        ->middleware('throttle:30,1')
+        ->name('cod.lifecycle51.status');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/{trackingKey}/history',
+        [
+            \App\Http\Controllers\Api\CheckoutCodTtnLifecycleController::class,
+            'history',
+        ]
+    )->whereUuid('trackingKey')
+        ->middleware('throttle:30,1')
+        ->name('cod.lifecycle51.history');
+
+    \Illuminate\Support\Facades\Route::post(
+        '/{trackingKey}/sync',
+        [
+            \App\Http\Controllers\Api\CheckoutCodTtnLifecycleController::class,
+            'sync',
+        ]
+    )->whereUuid('trackingKey')
+        ->middleware('throttle:10,1')
+        ->name('cod.lifecycle51.sync');
+});

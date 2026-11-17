@@ -3,7 +3,7 @@
 namespace Tests\Feature;
 
 use App\Services\Pricing\CheckoutCodSettlementSealService;
-
+use App\Services\Pricing\CheckoutCodTtnLifecycleService;
 use App\Services\Pricing\CheckoutCodFinanceCenterService;
 use App\Services\Pricing\CheckoutCodCorrectionSlaScanService;
 use App\Services\Pricing\CheckoutCodCorrectionSlaInboxService;
@@ -13269,5 +13269,279 @@ final class CheckoutCodTtnInvestigationCaseTest extends TestCase
         $this->postJson('/api/v1/admin/cod/settlement-seals', [
             'posting_key' => 'bad', 'operation_key' => (string) Str::uuid(),
         ])->assertStatus(422);
+    }
+    // ============================================================
+    // BLOCK 51 — NOVA POSHTA TTN LIFECYCLE EVIDENCE AND CRM QUEUE
+    // ============================================================
+
+    private function codLife51Fixture(): array
+    {
+        $candidate = $this->trackingCandidateReady();
+        Gate::define(CheckoutCodTtnInvestigationStatusService::VIEW_ABILITY,
+            static fn ($u): bool => in_array((int) $u->getAuthIdentifier(), [5101, 5102], true));
+        Gate::define(CheckoutCodTtnLifecycleService::VIEW_ABILITY,
+            static fn ($u): bool => in_array((int) $u->getAuthIdentifier(), [5101, 5102], true));
+        Gate::define(CheckoutCodTtnLifecycleService::SYNC_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 5101);
+        Gate::define(CheckoutCodTtnTrackingPollService::POLL_ABILITY,
+            static fn ($u): bool => (int) $u->getAuthIdentifier() === 1702);
+        return $candidate;
+    }
+
+    private function codLife51Poll(string $trackingKey, string $code): array
+    {
+        $this->trackingRows = [['Number' => self::WAYBILL, 'StatusCode' => $code]];
+        $this->actor(1702);
+        return app(CheckoutCodTtnTrackingPollService::class)
+            ->poll($trackingKey, (string) Str::uuid());
+    }
+
+    private function codLife51Sync(string $trackingKey): array
+    {
+        $this->actor(5101);
+        return app(CheckoutCodTtnLifecycleService::class)->sync($trackingKey);
+    }
+    public function test_cod_life51_no_observations_is_awaiting_evidence(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->actor(5101);
+        $r = app(CheckoutCodTtnLifecycleService::class)->status($c['tracking_key']);
+        $this->assertSame('awaiting_evidence', $r['observed_state']);
+        $this->assertFalse($r['customer_delivery_confirmed']);
+        $this->assertFalse($r['cod_paid']);
+    }
+
+    public function test_cod_life51_pickup_status_creates_contact_task_without_shipping_order(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->codLife51Poll($c['tracking_key'], '7');
+        $result = $this->codLife51Sync($c['tracking_key']);
+        $this->assertSame(1, $result['events_created']);
+        $this->assertSame('awaiting_pickup', $result['observed_state']);
+        $this->assertSame('contact_recipient', $result['action_code']);
+        $this->assertSame('pending', DB::table('orders')->where('order_key', $this->orderKey)->value('payment_status'));
+        $this->actor(5101);
+        $this->assertCount(1, app(CheckoutCodTtnLifecycleService::class)->queue('pickup')['items']);
+    }
+
+    public function test_cod_life51_transit_arrival_received_sequence_remains_unpaid(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->codLife51Poll($c['tracking_key'], '5');
+        CarbonImmutable::setTestNow(CarbonImmutable::now('UTC')->addMinutes(1));
+        $this->codLife51Poll($c['tracking_key'], '7');
+        CarbonImmutable::setTestNow(CarbonImmutable::now('UTC')->addMinutes(1));
+        $this->codLife51Poll($c['tracking_key'], '9');
+        $r = $this->codLife51Sync($c['tracking_key']);
+        $this->assertSame(3, $r['events_created']);
+        $this->assertSame('received', $r['observed_state']);
+        $this->assertSame('verify_cod_collection', $r['action_code']);
+        $this->assertFalse($r['cod_paid']);
+        $this->assertSame('pending', DB::table('orders')->where('order_key', $this->orderKey)->value('payment_status'));
+        $this->actor(5101);
+        $this->assertFalse(app(CheckoutCodTtnLifecycleService::class)->status($c['tracking_key'])['customer_delivery_confirmed']);
+    }
+
+    public function test_cod_life51_refused_creates_return_followup_not_return_receipt(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->codLife51Poll($c['tracking_key'], '103');
+        $this->codLife51Sync($c['tracking_key']);
+        $this->actor(5101);
+        $r = app(CheckoutCodTtnLifecycleService::class)->status($c['tracking_key']);
+        $this->assertSame('refused', $r['observed_state']);
+        $this->assertSame('follow_up_return', $r['action_code']);
+        $this->assertFalse($r['return_received_by_sender_confirmed']);
+    }
+
+    public function test_cod_life51_unclaimed_creates_return_followup(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->codLife51Poll($c['tracking_key'], '105');
+        $this->codLife51Sync($c['tracking_key']);
+        $this->actor(5101);
+        $items = app(CheckoutCodTtnLifecycleService::class)->queue('return')['items'];
+        $this->assertCount(1, $items);
+        $this->assertSame('unclaimed', $items[0]['observed_state']);
+    }
+
+    public function test_cod_life51_return_requested_does_not_mark_sender_receipt(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->codLife51Poll($c['tracking_key'], '102');
+        $this->codLife51Sync($c['tracking_key']);
+        $this->actor(5101);
+        $r = app(CheckoutCodTtnLifecycleService::class)->status($c['tracking_key']);
+        $this->assertSame('return_requested', $r['observed_state']);
+        $this->assertFalse($r['return_received_by_sender_confirmed']);
+        $this->assertFalse($r['inventory_restocked']);
+    }
+
+    public function test_cod_life51_sync_replay_creates_no_second_event(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->codLife51Poll($c['tracking_key'], '7');
+        $this->assertSame(1, $this->codLife51Sync($c['tracking_key'])['events_created']);
+        $this->assertSame(0, $this->codLife51Sync($c['tracking_key'])['events_created']);
+        $this->assertDatabaseCount('checkout_cod_ttn_lifecycle_events', 1);
+    }
+
+    public function test_cod_life51_incremental_sync_keeps_append_only_chain(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->codLife51Poll($c['tracking_key'], '5');
+        $this->codLife51Sync($c['tracking_key']);
+        CarbonImmutable::setTestNow(CarbonImmutable::now('UTC')->addMinutes(1));
+        $this->codLife51Poll($c['tracking_key'], '7');
+        $this->codLife51Sync($c['tracking_key']);
+        $r = DB::table('checkout_cod_ttn_lifecycle_events')->orderBy('id')->get();
+        $this->assertCount(2, $r);
+        $this->assertSame($r[0]->event_hmac, $r[1]->previous_hmac);
+        $this->actor(5101);
+        $this->assertSame('awaiting_pickup', app(CheckoutCodTtnLifecycleService::class)->status($c['tracking_key'])['observed_state']);
+    }
+
+    public function test_cod_life51_failed_poll_keeps_last_good_state(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->codLife51Poll($c['tracking_key'], '7');
+        $this->trackingShouldFail = true;
+        $this->actor(1702);
+        app(CheckoutCodTtnTrackingPollService::class)
+            ->poll($c['tracking_key'], (string) Str::uuid());
+        $this->codLife51Sync($c['tracking_key']);
+        $this->actor(5101);
+        $history = app(CheckoutCodTtnLifecycleService::class)->history($c['tracking_key']);
+        $this->assertSame('ignored_failure', $history['items'][0]['decision']);
+        $this->assertSame('awaiting_pickup', $history['items'][0]['observed_state']);
+    }
+
+    public function test_cod_life51_unknown_provider_code_is_not_delivered(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->codLife51Poll($c['tracking_key'], '999');
+        $this->codLife51Sync($c['tracking_key']);
+        $this->actor(5101);
+        $r = app(CheckoutCodTtnLifecycleService::class)->status($c['tracking_key']);
+        $this->assertSame('awaiting_evidence', $r['observed_state']);
+        $this->assertSame('ignored_unknown', $r['latest_decision']);
+    }
+    public function test_cod_life51_older_carrier_poll_does_not_regress(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->codLife51Poll($c['tracking_key'], '7');
+        $this->codLife51Sync($c['tracking_key']);
+        CarbonImmutable::setTestNow(CarbonImmutable::now('UTC')->subMinutes(15));
+        $this->codLife51Poll($c['tracking_key'], '9');
+        $this->codLife51Sync($c['tracking_key']);
+        $this->actor(5101);
+        $r = app(CheckoutCodTtnLifecycleService::class)->status($c['tracking_key']);
+        $this->assertSame('ignored_stale', $r['latest_decision']);
+        $this->assertSame('awaiting_pickup', $r['observed_state']);
+    }
+
+    public function test_cod_life51_received_then_refusal_is_a_manual_conflict(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->codLife51Poll($c['tracking_key'], '9');
+        CarbonImmutable::setTestNow(CarbonImmutable::now('UTC')->addMinutes(1));
+        $this->codLife51Poll($c['tracking_key'], '103');
+        $this->codLife51Sync($c['tracking_key']);
+        $this->actor(5101);
+        $r = app(CheckoutCodTtnLifecycleService::class)->status($c['tracking_key']);
+        $this->assertSame('conflict', $r['latest_decision']);
+        $this->assertTrue($r['needs_review']);
+        $this->assertSame('manual_carrier_review', $r['action_code']);
+        $this->assertSame('received', $r['observed_state']);
+    }
+
+    public function test_cod_life51_return_then_received_is_a_manual_conflict(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->codLife51Poll($c['tracking_key'], '103');
+        CarbonImmutable::setTestNow(CarbonImmutable::now('UTC')->addMinutes(1));
+        $this->codLife51Poll($c['tracking_key'], '9');
+        $this->codLife51Sync($c['tracking_key']);
+        $this->actor(5101);
+        $r = app(CheckoutCodTtnLifecycleService::class)->status($c['tracking_key']);
+        $this->assertSame('refused', $r['observed_state']);
+        $this->assertTrue($r['needs_review']);
+    }
+
+    public function test_cod_life51_new_transit_after_pickup_is_regression(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->codLife51Poll($c['tracking_key'], '7');
+        CarbonImmutable::setTestNow(CarbonImmutable::now('UTC')->addMinutes(1));
+        $this->codLife51Poll($c['tracking_key'], '5');
+        $this->codLife51Sync($c['tracking_key']);
+        $this->actor(5101);
+        $r = app(CheckoutCodTtnLifecycleService::class)->status($c['tracking_key']);
+        $this->assertSame('ignored_regression', $r['latest_decision']);
+        $this->assertSame('awaiting_pickup', $r['observed_state']);
+    }
+
+    public function test_cod_life51_106_is_flagged_for_review(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->codLife51Poll($c['tracking_key'], '106');
+        $this->codLife51Sync($c['tracking_key']);
+        $this->actor(5101);
+        $r = app(CheckoutCodTtnLifecycleService::class)->status($c['tracking_key']);
+        $this->assertSame('received_reverse_created', $r['observed_state']);
+        $this->assertTrue($r['needs_review']);
+    }
+
+    public function test_cod_life51_history_paginates_without_rewriting(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->codLife51Poll($c['tracking_key'], '5');
+        CarbonImmutable::setTestNow(CarbonImmutable::now('UTC')->addMinutes(1));
+        $this->codLife51Poll($c['tracking_key'], '7');
+        $this->codLife51Sync($c['tracking_key']);
+        $this->actor(5101);
+        $service = app(CheckoutCodTtnLifecycleService::class);
+        $first = $service->history($c['tracking_key'], 1);
+        $this->assertCount(1, $first['items']);
+        $this->assertNotNull($first['next_before_id']);
+        $second = $service->history($c['tracking_key'], 1, $first['next_before_id']);
+        $this->assertCount(1, $second['items']);
+        $this->assertNull($second['next_before_id']);
+    }
+
+    public function test_cod_life51_schedule_scans_stored_observations_once(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->codLife51Poll($c['tracking_key'], '103');
+        $this->assertSame(1, app(CheckoutCodTtnLifecycleService::class)->scanDue()['events_created']);
+        $this->assertSame(0, app(CheckoutCodTtnLifecycleService::class)->scanDue()['events_created']);
+        $this->assertDatabaseCount('checkout_cod_ttn_lifecycle_events', 1);
+    }
+
+    public function test_cod_life51_no_permission_cannot_sync_or_read(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->actor(999);
+        $this->expectException(AuthorizationException::class);
+        app(CheckoutCodTtnLifecycleService::class)->sync($c['tracking_key']);
+    }
+
+    public function test_cod_life51_postgresql_rejects_audit_mutation(): void
+    {
+        $c = $this->codLife51Fixture();
+        $this->codLife51Poll($c['tracking_key'], '7');
+        $this->codLife51Sync($c['tracking_key']);
+        $this->expectException(QueryException::class);
+        DB::table('checkout_cod_ttn_lifecycle_events')->delete();
+    }
+
+    public function test_cod_life51_routes_require_sanctum_and_are_registered(): void
+    {
+        foreach (['cod.lifecycle51.status', 'cod.lifecycle51.sync',
+                     'cod.lifecycle51.history', 'cod.lifecycle51.queue'] as $name) {
+            $route = \Illuminate\Support\Facades\Route::getRoutes()->getByName($name);
+            $this->assertNotNull($route);
+            $this->assertContains('auth:sanctum', $route->gatherMiddleware());
+        }
     }
 }
