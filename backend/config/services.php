@@ -61,5 +61,12 @@ return [
             'pb_primary_ua'
         ),
     ],
+    'mono_acquiring' => [
+        'enabled' => env('MONO_ACQUIRING_ENABLED', false),
+        'token' => env('MONO_MERCHANT_TOKEN'),
+        'public_key_base64' => env('MONO_WEBHOOK_PUBLIC_KEY_BASE64'),
+        'webhook_url' => env('MONO_WEBHOOK_URL'),
+        'redirect_url' => env('MONO_REDIRECT_URL'),
+    ],
 
 ];

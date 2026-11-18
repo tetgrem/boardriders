@@ -626,3 +626,54 @@ Route::post(
         ->middleware('throttle:10,1')
         ->name('cod.return52.decide');
 });
+
+// ============================================================
+// BOARDRIDERS #53 — MONOBANK ACQUIRING
+// ============================================================
+
+\Illuminate\Support\Facades\Route::post(
+    '/v1/payments/mono/webhook',
+    [
+        \App\Http\Controllers\Api\CheckoutMono53Controller::class,
+        'webhook',
+    ]
+)
+    ->middleware('throttle:60,1')
+    ->name('mono53.webhook');
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])
+    ->prefix('v1/admin/payments/mono')
+    ->group(function (): void {
+        \Illuminate\Support\Facades\Route::post(
+            '/invoices',
+            [
+                \App\Http\Controllers\Api\CheckoutMono53Controller::class,
+                'start',
+            ]
+        )
+            ->middleware('throttle:5,1')
+            ->name('mono53.start');
+
+        \Illuminate\Support\Facades\Route::post(
+            '/invoices/{invoiceId}/reconcile',
+            [
+                \App\Http\Controllers\Api\CheckoutMono53Controller::class,
+                'reconcile',
+            ]
+        )
+            ->middleware('throttle:10,1')
+            ->name('mono53.reconcile');
+
+        \Illuminate\Support\Facades\Route::post(
+            '/returns/{returnKey}/plan',
+            [
+                \App\Http\Controllers\Api\CheckoutMono53Controller::class,
+                'planRefund',
+            ]
+        )
+            ->whereUuid('returnKey')
+            ->middleware('throttle:10,1')
+            ->name('mono53.refund.plan');
+    });
