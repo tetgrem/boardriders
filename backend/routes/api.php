@@ -578,3 +578,51 @@ Route::post(
         ->middleware('throttle:10,1')
         ->name('cod.lifecycle51.sync');
 });
+
+// ============================================================
+// BOARDRIDERS BLOCK 52 — OMS RETURNS / RMA
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])->prefix('v1/admin/orders/returns')->group(function (): void {
+
+    \Illuminate\Support\Facades\Route::post(
+        '/cancel-pre-dispatch',
+        [\App\Http\Controllers\Api\CheckoutOrderReturnController::class, 'cancel']
+    )->middleware('throttle:5,1')
+        ->name('cod.return52.cancel');
+
+    \Illuminate\Support\Facades\Route::post(
+        '/cases',
+        [\App\Http\Controllers\Api\CheckoutOrderReturnController::class, 'open']
+    )->middleware('throttle:10,1')
+        ->name('cod.return52.open');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/queue',
+        [\App\Http\Controllers\Api\CheckoutOrderReturnController::class, 'queue']
+    )->middleware('throttle:30,1')
+        ->name('cod.return52.queue');
+
+    \Illuminate\Support\Facades\Route::get(
+        '/cases/{returnKey}',
+        [\App\Http\Controllers\Api\CheckoutOrderReturnController::class, 'show']
+    )->whereUuid('returnKey')
+        ->middleware('throttle:30,1')
+        ->name('cod.return52.show');
+
+    \Illuminate\Support\Facades\Route::post(
+        '/cases/{returnKey}/inspection',
+        [\App\Http\Controllers\Api\CheckoutOrderReturnController::class, 'inspect']
+    )->whereUuid('returnKey')
+        ->middleware('throttle:10,1')
+        ->name('cod.return52.inspect');
+
+    \Illuminate\Support\Facades\Route::post(
+        '/cases/{returnKey}/decision',
+        [\App\Http\Controllers\Api\CheckoutOrderReturnController::class, 'decide']
+    )->whereUuid('returnKey')
+        ->middleware('throttle:10,1')
+        ->name('cod.return52.decide');
+});
