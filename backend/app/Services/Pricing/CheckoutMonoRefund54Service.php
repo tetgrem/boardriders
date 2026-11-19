@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Pricing;
 
+use Carbon\CarbonImmutable;
 use DomainException;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Support\Facades\Auth;
@@ -14,14 +15,17 @@ use RuntimeException;
 use Throwable;
 
 /**
- * One-shot refund executor. An indeterminate request is NEVER sent again.
- * 'succeeded' means confirmed by Mono's invoice/status cancelList,
- * not card settlement.
+ * BOARDRIDERS #54 + #55.
+ *
+ * A refund POST is issued at most once for each persisted execution.
+ * Unknown provider outcomes never trigger automatic resubmission.
+ * A provider-confirmed refund is not proof of final card settlement.
  */
 final class CheckoutMonoRefund54Service
 {
     public const SEND_ABILITY = 'payments.mono.refunds.send';
     public const RECONCILE_ABILITY = 'payments.mono.refunds.reconcile';
+    public const RECOVER_ABILITY = 'payments.mono.refunds.recover';
 
     public function __construct(
         private readonly CheckoutMonoGateway53 $mono,
@@ -44,36 +48,22 @@ final class CheckoutMonoRefund54Service
 
         $this->sendingEnabled();
 
-        $claimed = DB::transaction(function () use (
-            $planId,
-            $actor
-        ): array {
+        $claimed = DB::transaction(function () use ($planId, $actor): array {
             $plan = DB::table('checkout_mono_rma_refund_plans')
                 ->where('id', $planId)
                 ->first();
 
             if ($plan === null) {
-                throw new DomainException(
-                    'Approved refund plan not found'
-                );
+                throw new DomainException('Approved refund plan not found');
             }
 
             $order = DB::table('orders')
                 ->where('id', $plan->order_id)
                 ->lockForUpdate()
-                ->first([
-                    'id',
-                    'order_key',
-                    'payment_status',
-                ]);
+                ->first(['id', 'order_key', 'payment_status']);
 
-            if (
-                $order === null
-                || $order->payment_status !== 'paid'
-            ) {
-                throw new DomainException(
-                    'Refund requires paid order'
-                );
+            if ($order === null || $order->payment_status !== 'paid') {
+                throw new DomainException('Refund requires paid order');
             }
 
             $this->verifyPlan($plan);
@@ -84,9 +74,7 @@ final class CheckoutMonoRefund54Service
                 );
             }
 
-            $existing = DB::table(
-                'checkout_mono_refund_executions'
-            )
+            $existing = DB::table('checkout_mono_refund_executions')
                 ->where('refund_plan_id', $planId)
                 ->first();
 
@@ -99,74 +87,66 @@ final class CheckoutMonoRefund54Service
                 ];
             }
 
-            // Do not dispatch another refund for this capture
-            // while an earlier cancellation is unresolved.
-            if (
-                DB::table('checkout_mono_refund_executions')
-                    ->where(
-                        'capture_receipt_id',
-                        $plan->capture_receipt_id
-                    )
-                    ->where('status', '!=', 'succeeded')
-                    ->exists()
-            ) {
-                throw new DomainException(
-                    'Previous Mono refund is unresolved'
-                );
+            // An unresolved execution reserves the full amount indefinitely.
+            if (DB::table('checkout_mono_refund_executions')
+                ->where('capture_receipt_id', $plan->capture_receipt_id)
+                ->where('status', '!=', 'succeeded')
+                ->exists()) {
+                throw new DomainException('Previous Mono refund is unresolved');
             }
 
             $receipt = $this->verifiedReceipt($plan);
 
-            $launch = DB::table(
-                'checkout_mono_invoice_launches'
-            )
+            // Application-side budget check. #55 also enforces this in PostgreSQL.
+            $reservedMinor = (int) DB::table('checkout_mono_refund_executions')
+                ->where('capture_receipt_id', $plan->capture_receipt_id)
+                ->sum('amount_minor');
+
+            $availableMinor = (int) $receipt['amount_minor'] - $reservedMinor;
+
+            if ($availableMinor < 0 || (int) $plan->amount_minor > $availableMinor) {
+                throw new DomainException(
+                    'Mono refund exceeds remaining captured amount'
+                );
+            }
+
+            $launch = DB::table('checkout_mono_invoice_launches')
                 ->where('order_id', $order->id)
                 ->first();
 
             if (
                 $launch === null
                 || $launch->status !== 'ready'
-                || $launch->provider_invoice_id
-                !== $receipt['provider_payment_id']
-                || (int) $launch->amount_minor
-                !== $receipt['amount_minor']
+                || $launch->provider_invoice_id !== $receipt['provider_payment_id']
+                || (int) $launch->amount_minor !== (int) $receipt['amount_minor']
             ) {
                 throw new DomainException(
                     'Original Mono invoice does not match capture'
                 );
             }
 
-            $extRef = str_replace(
-                '-',
-                '',
-                (string) $plan->operation_key
-            );
+            $extRef = str_replace('-', '', (string) $plan->operation_key);
 
             $identity = [
                 'refund_plan_id' => (int) $plan->id,
                 'order_id' => (int) $plan->order_id,
-                'capture_receipt_id' =>
-                    (int) $plan->capture_receipt_id,
-                'operation_key' =>
-                    (string) $plan->operation_key,
+                'capture_receipt_id' => (int) $plan->capture_receipt_id,
+                'operation_key' => (string) $plan->operation_key,
                 'ext_ref' => $extRef,
-                'invoice_id' =>
-                    (string) $launch->provider_invoice_id,
+                'invoice_id' => (string) $launch->provider_invoice_id,
                 'amount_minor' => (int) $plan->amount_minor,
                 'currency_code' => 'UAH',
                 'executed_by' => $actor,
             ];
 
-            $id = (int) DB::table(
-                'checkout_mono_refund_executions'
-            )->insertGetId([
-                ...$identity,
-                'status' => 'sending',
-                'request_hmac' =>
-                    $this->signer->digest($identity),
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]);
+            $id = (int) DB::table('checkout_mono_refund_executions')
+                ->insertGetId([
+                    ...$identity,
+                    'status' => 'sending',
+                    'request_hmac' => $this->signer->digest($identity),
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
 
             return [
                 'new' => true,
@@ -177,16 +157,14 @@ final class CheckoutMonoRefund54Service
         $id = $claimed['id'];
 
         if (!$claimed['new']) {
-            // Existing operation: NEVER send provider POST again.
+            // An existing operation MUST NOT issue a second provider POST.
             return $this->read($id);
         }
 
         $execution = $this->raw($id);
         $orderKey = $this->orderKey($execution);
 
-        $capture = DB::table(
-            'checkout_payment_capture_receipts'
-        )
+        $capture = DB::table('checkout_payment_capture_receipts')
             ->where('id', $execution->capture_receipt_id)
             ->first(['amount_minor']);
 
@@ -201,12 +179,9 @@ final class CheckoutMonoRefund54Service
             );
         }
 
-        // Preflight GET. Do not send money if provider evidence
-        // is inconsistent, missing or unavailable.
+        // Check the provider before dispatching the ONE permitted POST.
         try {
-            $status = $this->mono->status(
-                (string) $execution->invoice_id
-            );
+            $status = $this->mono->status((string) $execution->invoice_id);
 
             $checked = $this->evidence->inspect(
                 $status,
@@ -239,8 +214,8 @@ final class CheckoutMonoRefund54Service
             );
         }
 
-        // Already visible at Mono: do not send another POST.
         if ($checked['state'] !== 'absent') {
+            // Provider already knows this ext_ref: NO additional POST.
             return $this->observe(
                 $id,
                 'invoice_status',
@@ -251,17 +226,13 @@ final class CheckoutMonoRefund54Service
             );
         }
 
-        // Never send a new cancellation for a reversed invoice.
         if (($status['status'] ?? null) !== 'success') {
             return $this->observe(
                 $id,
                 'submission',
                 'blocked',
                 null,
-                hash(
-                    'sha256',
-                    'original-invoice-not-chargeable'
-                ),
+                hash('sha256', 'original-invoice-not-chargeable'),
                 'needs_review'
             );
         }
@@ -280,13 +251,10 @@ final class CheckoutMonoRefund54Service
                 'submitted',
                 null,
                 hash('sha256', 'mono-cancel-reply:' . $reply),
-                $reply === 'failure'
-                    ? 'needs_review'
-                    : 'awaiting_evidence'
+                $reply === 'failure' ? 'needs_review' : 'awaiting_evidence'
             );
         } catch (Throwable $e) {
-            // Includes timeout, 4xx/5xx and malformed JSON.
-            // Never retry automatically.
+            // Includes timeouts and non-2xx responses. Never retry automatically.
             report($e);
 
             return $this->observe(
@@ -308,31 +276,22 @@ final class CheckoutMonoRefund54Service
         $execution = $this->raw($executionId);
         $this->verifyExecution($execution);
 
-        if (in_array($execution->status, [
-            'succeeded',
-            'sending',
-        ], true)) {
-            // Do not race an in-flight monetary POST.
-            // A crashed 'sending' case requires audited manual recovery.
+        // Do not race an in-flight monetary POST.
+        // A stuck 'sending' is handled by separately authorized recoverStale().
+        if (in_array($execution->status, ['succeeded', 'sending'], true)) {
             return $this->read($executionId);
         }
 
-        $capture = DB::table(
-            'checkout_payment_capture_receipts'
-        )
+        $capture = DB::table('checkout_payment_capture_receipts')
             ->where('id', $execution->capture_receipt_id)
             ->first(['amount_minor']);
 
         if ($capture === null) {
-            throw new DomainException(
-                'Original capture missing'
-            );
+            throw new DomainException('Original capture missing');
         }
 
         try {
-            $status = $this->mono->status(
-                (string) $execution->invoice_id
-            );
+            $status = $this->mono->status((string) $execution->invoice_id);
 
             $checked = $this->evidence->inspect(
                 $status,
@@ -355,7 +314,7 @@ final class CheckoutMonoRefund54Service
         } catch (Throwable $e) {
             report($e);
 
-            // Do not invent provider status when GET fails.
+            // A failed GET is not evidence of provider refund state.
             return $this->read($executionId);
         }
 
@@ -366,6 +325,116 @@ final class CheckoutMonoRefund54Service
             $checked['matched_amount_minor'],
             $checked['evidence_sha256'],
             $this->targetStatus($checked['state'])
+        );
+    }
+
+    /** @return array<int,array<string,int|string>> */
+    public function staleExecutions(): array
+    {
+        $this->actor(self::RECOVER_ABILITY);
+
+        return DB::table('checkout_mono_refund_executions')
+            ->where('status', 'sending')
+            ->where('created_at', '<=', CarbonImmutable::now('UTC')->subMinutes(15))
+            ->orderBy('id')
+            ->limit(100)
+            ->get([
+                'id',
+                'refund_plan_id',
+                'amount_minor',
+                'currency_code',
+                'created_at',
+            ])
+            ->map(static fn (object $row): array => [
+                'execution_id' => (int) $row->id,
+                'refund_plan_id' => (int) $row->refund_plan_id,
+                'amount_minor' => (int) $row->amount_minor,
+                'currency_code' => (string) $row->currency_code,
+                'created_at' => (string) $row->created_at,
+            ])
+            ->all();
+    }
+
+    /**
+     * Investigate a stuck sending record by GET only. Never re-send POST /cancel.
+     *
+     * @return array<string,mixed>
+     */
+    public function recoverStale(int $executionId): array
+    {
+        $actor = $this->actor(self::RECOVER_ABILITY);
+
+        $execution = $this->raw($executionId);
+        $this->verifyExecution($execution);
+
+        if ($execution->status !== 'sending') {
+            throw new DomainException(
+                'Only stuck sending refunds can be recovered'
+            );
+        }
+
+        if (CarbonImmutable::parse((string) $execution->created_at, 'UTC')
+            ->greaterThan(CarbonImmutable::now('UTC')->subMinutes(15))) {
+            throw new DomainException(
+                'Refund is not old enough for manual recovery'
+            );
+        }
+
+        $capture = DB::table('checkout_payment_capture_receipts')
+            ->where('id', $execution->capture_receipt_id)
+            ->first(['amount_minor']);
+
+        if ($capture === null) {
+            return $this->observe(
+                $executionId,
+                'invoice_status',
+                'unexpected',
+                null,
+                hash('sha256', 'mono55-missing-capture'),
+                'needs_review',
+                $actor
+            );
+        }
+
+        try {
+            $status = $this->mono->status((string) $execution->invoice_id);
+
+            $checked = $this->evidence->inspect(
+                $status,
+                (string) $execution->invoice_id,
+                $this->orderKey($execution),
+                (int) $capture->amount_minor,
+                (string) $execution->ext_ref,
+                (int) $execution->amount_minor,
+                $this->knownRefunds($execution),
+            );
+        } catch (Throwable $exception) {
+            report($exception);
+
+            return $this->observe(
+                $executionId,
+                'invoice_status',
+                'unexpected',
+                null,
+                hash('sha256', 'mono55-unverifiable-provider-state'),
+                'needs_review',
+                $actor
+            );
+        }
+
+        // Absence in GET does NOT prove that the original POST was never sent.
+        $target = $checked['state'] === 'absent'
+            ? 'needs_review'
+            : $this->targetStatus($checked['state']);
+
+        return $this->observe(
+            $executionId,
+            'invoice_status',
+            $checked['state'],
+            $checked['matched_amount_minor'],
+            $checked['evidence_sha256'],
+            $target,
+            $actor
         );
     }
 
@@ -386,7 +455,13 @@ final class CheckoutMonoRefund54Service
         };
     }
 
-    /** @return array<string,mixed> */
+    /**
+     * Atomic provider observation and legal state transition.
+     * For #55 manual observations only, reviewed_by is covered by HMAC.
+     * For #54 observations, HMAC payload remains unchanged.
+     *
+     * @return array<string,mixed>
+     */
     private function observe(
         int $executionId,
         string $source,
@@ -394,6 +469,7 @@ final class CheckoutMonoRefund54Service
         ?int $matched,
         string $evidenceSha,
         string $targetStatus,
+        ?int $reviewedBy = null,
     ): array {
         return DB::transaction(function () use (
             $executionId,
@@ -401,18 +477,15 @@ final class CheckoutMonoRefund54Service
             $state,
             $matched,
             $evidenceSha,
-            $targetStatus
+            $targetStatus,
+            $reviewedBy
         ): array {
-            $unlocked = DB::table(
-                'checkout_mono_refund_executions'
-            )
+            $unlocked = DB::table('checkout_mono_refund_executions')
                 ->where('id', $executionId)
                 ->first(['order_id']);
 
             if ($unlocked === null) {
-                throw new DomainException(
-                    'Refund execution not found'
-                );
+                throw new DomainException('Refund execution not found');
             }
 
             DB::table('orders')
@@ -420,9 +493,7 @@ final class CheckoutMonoRefund54Service
                 ->lockForUpdate()
                 ->first(['id']);
 
-            $execution = DB::table(
-                'checkout_mono_refund_executions'
-            )
+            $execution = DB::table('checkout_mono_refund_executions')
                 ->where('id', $executionId)
                 ->lockForUpdate()
                 ->first();
@@ -433,9 +504,7 @@ final class CheckoutMonoRefund54Service
                 return $this->read($executionId);
             }
 
-            $last = DB::table(
-                'checkout_mono_refund_observations'
-            )
+            $last = DB::table('checkout_mono_refund_observations')
                 ->where('execution_id', $executionId)
                 ->orderByDesc('id')
                 ->first();
@@ -450,31 +519,39 @@ final class CheckoutMonoRefund54Service
                     ? null
                     : (int) $last->matched_amount_minor
                 ) === $matched
+                && (
+                $last->reviewed_by === null
+                    ? null
+                    : (int) $last->reviewed_by
+                ) === $reviewedBy
             ) {
                 return $this->read($executionId);
             }
 
-            $observationKey = (string) Str::uuid();
-
             $audit = [
                 'execution_id' => $executionId,
-                'observation_key' => $observationKey,
+                'observation_key' => (string) Str::uuid(),
                 'source' => $source,
                 'state' => $state,
                 'matched_amount_minor' => $matched,
                 'evidence_sha256' => $evidenceSha,
             ];
 
-            DB::table(
-                'checkout_mono_refund_observations'
-            )->insert([
+            // Include reviewed_by in signature only for manually reviewed rows.
+            if ($reviewedBy !== null) {
+                $audit['reviewed_by'] = $reviewedBy;
+            }
+
+            // CRITICAL: ALL audit fields MUST be part of INSERT (not just
+            // reviewed_by, evidence_hmac and created_at).
+            DB::table('checkout_mono_refund_observations')->insert([
                 ...$audit,
-                'evidence_hmac' =>
-                    $this->signer->digest($audit),
+                'evidence_hmac' => $this->signer->digest($audit),
                 'created_at' => now(),
             ]);
 
-            // Do not downgrade manual review to pending.
+            // Once flagged for investigation, non-success evidence cannot
+            // silently clear the manual review requirement.
             if (
                 $execution->status === 'needs_review'
                 && $targetStatus !== 'succeeded'
@@ -483,9 +560,7 @@ final class CheckoutMonoRefund54Service
             }
 
             if ($execution->status !== $targetStatus) {
-                DB::table(
-                    'checkout_mono_refund_executions'
-                )
+                DB::table('checkout_mono_refund_executions')
                     ->where('id', $executionId)
                     ->update([
                         'status' => $targetStatus,
@@ -503,9 +578,7 @@ final class CheckoutMonoRefund54Service
         $execution = $this->raw($executionId);
         $this->verifyExecution($execution);
 
-        $events = DB::table(
-            'checkout_mono_refund_observations'
-        )
+        $events = DB::table('checkout_mono_refund_observations')
             ->where('execution_id', $executionId)
             ->orderBy('id')
             ->get();
@@ -515,17 +588,20 @@ final class CheckoutMonoRefund54Service
         foreach ($events as $event) {
             $audit = [
                 'execution_id' => $executionId,
-                'observation_key' =>
-                    (string) $event->observation_key,
+                'observation_key' => (string) $event->observation_key,
                 'source' => (string) $event->source,
                 'state' => (string) $event->state,
                 'matched_amount_minor' =>
                     $event->matched_amount_minor === null
                         ? null
                         : (int) $event->matched_amount_minor,
-                'evidence_sha256' =>
-                    (string) $event->evidence_sha256,
+                'evidence_sha256' => (string) $event->evidence_sha256,
             ];
+
+            // The same conditional HMAC shape as observe().
+            if ($event->reviewed_by !== null) {
+                $audit['reviewed_by'] = (int) $event->reviewed_by;
+            }
 
             if (!hash_equals(
                 (string) $event->evidence_hmac,
@@ -550,8 +626,7 @@ final class CheckoutMonoRefund54Service
 
         return [
             'execution_id' => $executionId,
-            'refund_plan_id' =>
-                (int) $execution->refund_plan_id,
+            'refund_plan_id' => (int) $execution->refund_plan_id,
             'order_id' => (int) $execution->order_id,
             'invoice_id' => (string) $execution->invoice_id,
             'ext_ref' => (string) $execution->ext_ref,
@@ -559,8 +634,7 @@ final class CheckoutMonoRefund54Service
             'currency_code' => 'UAH',
             'status' => (string) $execution->status,
             'last_evidence_state' => $lastState,
-            'provider_refund_confirmed' =>
-                $execution->status === 'succeeded',
+            'provider_refund_confirmed' => $execution->status === 'succeeded',
             'card_settlement_confirmed' => false,
             'loyalty_refunded' => false,
             'inventory_restocked' => false,
@@ -571,21 +645,15 @@ final class CheckoutMonoRefund54Service
     private function raw(int $id): object
     {
         if ($id <= 0) {
-            throw new DomainException(
-                'Invalid refund execution ID'
-            );
+            throw new DomainException('Invalid refund execution ID');
         }
 
-        $row = DB::table(
-            'checkout_mono_refund_executions'
-        )
+        $row = DB::table('checkout_mono_refund_executions')
             ->where('id', $id)
             ->first();
 
         if ($row === null) {
-            throw new DomainException(
-                'Refund execution not found'
-            );
+            throw new DomainException('Refund execution not found');
         }
 
         return $row;
@@ -598,9 +666,7 @@ final class CheckoutMonoRefund54Service
             ->value('order_key');
 
         if (!is_string($key)) {
-            throw new DomainException(
-                'Refund order key missing'
-            );
+            throw new DomainException('Refund order key missing');
         }
 
         return $key;
@@ -610,10 +676,7 @@ final class CheckoutMonoRefund54Service
     private function knownRefunds(object $execution): array
     {
         return DB::table('checkout_mono_refund_executions')
-            ->where(
-                'capture_receipt_id',
-                $execution->capture_receipt_id
-            )
+            ->where('capture_receipt_id', $execution->capture_receipt_id)
             ->pluck('amount_minor', 'ext_ref')
             ->map(fn ($value): int => (int) $value)
             ->all();
@@ -624,13 +687,10 @@ final class CheckoutMonoRefund54Service
         $payload = [
             'case_id' => (int) $plan->return_case_id,
             'order_id' => (int) $plan->order_id,
-            'capture_receipt_id' =>
-                (int) $plan->capture_receipt_id,
-            'operation_key' =>
-                (string) $plan->operation_key,
+            'capture_receipt_id' => (int) $plan->capture_receipt_id,
+            'operation_key' => (string) $plan->operation_key,
             'amount_minor' => (int) $plan->amount_minor,
-            'currency_code' =>
-                (string) $plan->currency_code,
+            'currency_code' => (string) $plan->currency_code,
             'planned_by' => (int) $plan->planned_by,
         ];
 
@@ -638,18 +698,14 @@ final class CheckoutMonoRefund54Service
             (string) $plan->plan_hmac,
             $this->signer->digest($payload)
         )) {
-            throw new RuntimeException(
-                'Signed refund plan does not match record'
-            );
+            throw new RuntimeException('Signed refund plan does not match record');
         }
     }
 
     /** @return array<string,mixed> */
     private function verifiedReceipt(object $plan): array
     {
-        $row = DB::table(
-            'checkout_payment_capture_receipts'
-        )
+        $row = DB::table('checkout_payment_capture_receipts')
             ->where('id', $plan->capture_receipt_id)
             ->first();
 
@@ -657,17 +713,12 @@ final class CheckoutMonoRefund54Service
             $row === null
             || $row->provider_code !== 'mono'
             || (int) $row->order_id !== (int) $plan->order_id
-            || (int) $plan->amount_minor
-            > (int) $row->amount_minor
+            || (int) $plan->amount_minor > (int) $row->amount_minor
         ) {
-            throw new DomainException(
-                'Mono refund capture is invalid'
-            );
+            throw new DomainException('Mono refund capture is invalid');
         }
 
-        $decision = DB::table(
-            'checkout_payment_capture_decisions'
-        )
+        $decision = DB::table('checkout_payment_capture_decisions')
             ->where('receipt_id', $row->id)
             ->where('decision', 'paid')
             ->first();
@@ -677,22 +728,17 @@ final class CheckoutMonoRefund54Service
             (string) $row->provider_capture_id
         );
 
-        $attempt = $this->attempts->findForOrder(
-            (int) $plan->order_id
-        );
+        $attempt = $this->attempts->findForOrder((int) $plan->order_id);
 
         if (
             $decision === null
             || $receipt === null
             || $attempt === null
             || $receipt['id'] !== (int) $row->id
-            || $receipt['provider_payment_id']
-            !== $attempt['provider_payment_id']
+            || $receipt['provider_payment_id'] !== $attempt['provider_payment_id']
             || $attempt['provider_code'] !== 'mono'
-            || $attempt['provider_payment_id']
-            !== $row->provider_capture_id
-            || $receipt['amount_minor']
-            !== (int) $row->amount_minor
+            || $attempt['provider_payment_id'] !== $row->provider_capture_id
+            || $receipt['amount_minor'] !== (int) $row->amount_minor
             || $receipt['currency_code'] !== 'UAH'
         ) {
             throw new DomainException(
@@ -706,18 +752,14 @@ final class CheckoutMonoRefund54Service
     private function verifyExecution(object $execution): void
     {
         $identity = [
-            'refund_plan_id' =>
-                (int) $execution->refund_plan_id,
+            'refund_plan_id' => (int) $execution->refund_plan_id,
             'order_id' => (int) $execution->order_id,
-            'capture_receipt_id' =>
-                (int) $execution->capture_receipt_id,
-            'operation_key' =>
-                (string) $execution->operation_key,
+            'capture_receipt_id' => (int) $execution->capture_receipt_id,
+            'operation_key' => (string) $execution->operation_key,
             'ext_ref' => (string) $execution->ext_ref,
             'invoice_id' => (string) $execution->invoice_id,
             'amount_minor' => (int) $execution->amount_minor,
-            'currency_code' =>
-                (string) $execution->currency_code,
+            'currency_code' => (string) $execution->currency_code,
             'executed_by' => (int) $execution->executed_by,
         ];
 
@@ -735,9 +777,7 @@ final class CheckoutMonoRefund54Service
     {
         if (
             config('services.mono_acquiring.enabled') !== true
-            || config(
-                'services.mono_acquiring.refunds.enabled'
-            ) !== true
+            || config('services.mono_acquiring.refunds.enabled') !== true
             || config(
                 'services.mono_acquiring.refunds.non_fiscalized_merchant_confirmed'
             ) !== true
@@ -760,9 +800,7 @@ final class CheckoutMonoRefund54Service
             || (int) $id <= 0
             || !Gate::forUser($user)->allows($ability)
         ) {
-            throw new AuthorizationException(
-                'Mono refund access denied'
-            );
+            throw new AuthorizationException('Mono refund access denied');
         }
 
         return (int) $id;

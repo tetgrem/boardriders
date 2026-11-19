@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Services\Pricing\CheckoutOrderReturnSigner;
 use App\Services\Pricing\CheckoutMonoPayment53Service;
 use App\Services\Pricing\CheckoutMonoRefund54Service;
 use App\Services\Pricing\CheckoutMonoRmaRefund53Service;
@@ -27,6 +28,8 @@ use Tests\TestCase;
 final class CheckoutMonoRefund54Test extends TestCase
 {
     use RefreshDatabase;
+    use \Tests\Feature\Concerns\CheckoutMonoRefund56Cases;
+
 
     private int $variantId;
     private int $warehouseId;
@@ -163,6 +166,8 @@ final class CheckoutMonoRefund54Test extends TestCase
             CheckoutOrderReturnService::DECIDE_ABILITY => 5307,
             CheckoutMonoRefund54Service::SEND_ABILITY => 5401,
             CheckoutMonoRefund54Service::RECONCILE_ABILITY => 5402,
+            CheckoutMonoRefund54Service::RECOVER_ABILITY => 5403,
+            \App\Services\Pricing\CheckoutMonoRefund56JournalService::JOURNAL_ABILITY => 5601,
         ];
 
         foreach ($abilities as $ability => $userId) {
@@ -800,6 +805,334 @@ final class CheckoutMonoRefund54Test extends TestCase
                      'mono54.send',
                      'mono54.reconcile',
                      'mono54.show',
+                 ] as $name) {
+            $route = \Illuminate\Support\Facades\Route::getRoutes()
+                ->getByName($name);
+
+            $this->assertNotNull($route);
+
+            $this->assertContains(
+                'auth:sanctum',
+                $route->gatherMiddleware()
+            );
+        }
+    }
+    // ============================================================
+// BOARDRIDERS #55 — STALE MONO REFUND RECOVERY
+// ============================================================
+
+    /** @return array{id:int,ext_ref:string} */
+    private function stuckExecution55(array $fixture): array
+    {
+        $plan = DB::table('checkout_mono_rma_refund_plans')
+            ->where('id', $fixture['plan_id'])
+            ->first();
+
+        $receipt = DB::table(
+            'checkout_payment_capture_receipts'
+        )
+            ->where('id', $plan->capture_receipt_id)
+            ->first();
+
+        $identity = [
+            'refund_plan_id' => (int) $plan->id,
+            'order_id' => (int) $plan->order_id,
+            'capture_receipt_id' =>
+                (int) $plan->capture_receipt_id,
+            'operation_key' => (string) $plan->operation_key,
+            'ext_ref' => str_replace(
+                '-',
+                '',
+                (string) $plan->operation_key
+            ),
+            'invoice_id' =>
+                (string) $receipt->provider_payment_id,
+            'amount_minor' => (int) $plan->amount_minor,
+            'currency_code' => 'UAH',
+            'executed_by' => 5401,
+        ];
+
+        // Симулируем обрыв PHP-процесса после записи заявки
+        // в БД, но до получения ответа от Mono.
+        $id = (int) DB::table(
+            'checkout_mono_refund_executions'
+        )->insertGetId([
+            ...$identity,
+            'status' => 'sending',
+            'request_hmac' =>
+                app(CheckoutOrderReturnSigner::class)
+                    ->digest($identity),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        return [
+            'id' => $id,
+            'ext_ref' => $identity['ext_ref'],
+        ];
+    }
+
+    private function advance55(): void
+    {
+        CarbonImmutable::setTestNow(
+            CarbonImmutable::now('UTC')->addMinutes(16)
+        );
+    }
+
+    public function test_cod_mono55_fresh_sending_cannot_be_recovered(): void
+    {
+        $fixture = $this->approvedPlan();
+        $stuck = $this->stuckExecution55($fixture);
+
+        $this->actor(5403);
+
+        $this->expectException(DomainException::class);
+
+        app(CheckoutMonoRefund54Service::class)
+            ->recoverStale($stuck['id']);
+    }
+
+    public function test_cod_mono55_stale_absent_is_review_not_retry(): void
+    {
+        $fixture = $this->approvedPlan();
+        $stuck = $this->stuckExecution55($fixture);
+
+        $this->advance55();
+
+        $this->replaceMonoHttpFake([
+            'https://api.monobank.ua/api/merchant/invoice/status*' =>
+                Http::response(
+                    $this->invoice($fixture['order_key'])
+                ),
+        ]);
+
+        $this->actor(5403);
+
+        $service = app(
+            CheckoutMonoRefund54Service::class
+        );
+
+        $out = $service->recoverStale($stuck['id']);
+
+        $this->assertSame(
+            'needs_review',
+            $out['status']
+        );
+
+        $this->assertSame(
+            'absent',
+            $out['last_evidence_state']
+        );
+
+        $this->assertFalse(
+            $out['provider_refund_confirmed']
+        );
+
+        $this->assertDatabaseHas(
+            'checkout_mono_refund_observations',
+            [
+                'execution_id' => $stuck['id'],
+                'state' => 'absent',
+                'reviewed_by' => 5403,
+            ]
+        );
+
+        Http::assertNotSent(
+            fn ($r): bool => str_contains(
+                $r->url(),
+                '/invoice/cancel'
+            )
+        );
+
+        $this->actor(5401);
+
+        $replayed = $service->send(
+            $fixture['plan_id']
+        );
+
+        $this->assertSame(
+            $stuck['id'],
+            $replayed['execution_id']
+        );
+
+        $this->assertSame(
+            'needs_review',
+            $replayed['status']
+        );
+
+        Http::assertNotSent(
+            fn ($r): bool => str_contains(
+                $r->url(),
+                '/invoice/cancel'
+            )
+        );
+    }
+
+    public function test_cod_mono55_stale_provider_success_is_verified(): void
+    {
+        $fixture = $this->approvedPlan();
+        $stuck = $this->stuckExecution55($fixture);
+
+        $this->advance55();
+
+        $this->replaceMonoHttpFake([
+            'https://api.monobank.ua/api/merchant/invoice/status*' =>
+                Http::response(
+                    $this->invoice(
+                        $fixture['order_key'],
+                        [[
+                            'extRef' => $stuck['ext_ref'],
+                            'status' => 'success',
+                            'amount' => 1000,
+                            'ccy' => 980,
+                        ]]
+                    )
+                ),
+        ]);
+
+        $this->actor(5403);
+
+        $out = app(
+            CheckoutMonoRefund54Service::class
+        )->recoverStale($stuck['id']);
+
+        $this->assertSame(
+            'succeeded',
+            $out['status']
+        );
+
+        $this->assertTrue(
+            $out['provider_refund_confirmed']
+        );
+
+        $this->assertFalse(
+            $out['card_settlement_confirmed']
+        );
+
+        $this->assertSame(
+            1,
+            $out['observation_count']
+        );
+
+        $this->assertDatabaseHas(
+            'checkout_mono_refund_observations',
+            [
+                'execution_id' => $stuck['id'],
+                'state' => 'success',
+                'reviewed_by' => 5403,
+                'matched_amount_minor' => 1000,
+            ]
+        );
+
+        Http::assertNotSent(
+            fn ($r): bool => str_contains(
+                $r->url(),
+                '/invoice/cancel'
+            )
+        );
+    }
+
+    public function test_cod_mono55_provider_unavailable_needs_manual_review(): void
+    {
+        $fixture = $this->approvedPlan();
+        $stuck = $this->stuckExecution55($fixture);
+
+        $this->advance55();
+
+        $this->replaceMonoHttpFake([
+            'https://api.monobank.ua/api/merchant/invoice/status*' =>
+                Http::response([], 503),
+        ]);
+
+        $this->actor(5403);
+
+        $out = app(
+            CheckoutMonoRefund54Service::class
+        )->recoverStale($stuck['id']);
+
+        $this->assertSame(
+            'needs_review',
+            $out['status']
+        );
+
+        $this->assertSame(
+            'unexpected',
+            $out['last_evidence_state']
+        );
+
+        Http::assertNotSent(
+            fn ($r): bool => str_contains(
+                $r->url(),
+                '/invoice/cancel'
+            )
+        );
+    }
+
+    public function test_cod_mono55_recovery_requires_separate_finance_ability(): void
+    {
+        $fixture = $this->approvedPlan();
+        $stuck = $this->stuckExecution55($fixture);
+
+        $this->advance55();
+
+        $this->actor(5402);
+
+        $this->expectException(
+            AuthorizationException::class
+        );
+
+        app(CheckoutMonoRefund54Service::class)
+            ->recoverStale($stuck['id']);
+    }
+
+    public function test_cod_mono55_stale_list_only_contains_old_sending(): void
+    {
+        $fixture = $this->approvedPlan();
+        $stuck = $this->stuckExecution55($fixture);
+
+        $this->actor(5403);
+
+        $service = app(
+            CheckoutMonoRefund54Service::class
+        );
+
+        $this->assertSame(
+            [],
+            $service->staleExecutions()
+        );
+
+        $this->advance55();
+
+        $list = $service->staleExecutions();
+
+        $this->assertCount(1, $list);
+
+        $this->assertSame(
+            $stuck['id'],
+            $list[0]['execution_id']
+        );
+    }
+
+    public function test_cod_mono55_database_budget_guard_is_installed(): void
+    {
+        $row = DB::selectOne(<<<'SQL'
+        SELECT COUNT(*) AS total
+        FROM pg_trigger
+        WHERE tgname = 'mono55_refund_budget_guard'
+          AND NOT tgisinternal
+    SQL);
+
+        $this->assertSame(
+            1,
+            (int) $row->total
+        );
+    }
+
+    public function test_cod_mono55_routes_use_sanctum(): void
+    {
+        foreach ([
+                     'mono55.stale',
+                     'mono55.recover',
                  ] as $name) {
             $route = \Illuminate\Support\Facades\Route::getRoutes()
                 ->getByName($name);

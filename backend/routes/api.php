@@ -720,3 +720,55 @@ Route::post(
             ->middleware('throttle:30,1')
             ->name('mono54.show');
     });
+
+// ============================================================
+// BOARDRIDERS #55 — STALE MONO REFUND RECOVERY
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])
+    ->prefix('v1/admin/payments/mono/refunds')
+    ->group(function (): void {
+        \Illuminate\Support\Facades\Route::get(
+            '/executions/stale',
+            [
+                \App\Http\Controllers\Api\CheckoutMonoRefund55Controller::class,
+                'stale',
+            ]
+        )
+            ->middleware('throttle:20,1')
+            ->name('mono55.stale');
+
+        \Illuminate\Support\Facades\Route::post(
+            '/executions/{executionId}/recover',
+            [
+                \App\Http\Controllers\Api\CheckoutMonoRefund55Controller::class,
+                'recover',
+            ]
+        )
+            ->whereNumber('executionId')
+            ->middleware('throttle:5,1')
+            ->name('mono55.recover');
+    });
+
+// BOARDRIDERS #56 — verified Mono refund journal
+\Illuminate\Support\Facades\Route::middleware(['auth:sanctum'])
+    ->prefix('v1/admin/payments/mono/refunds')
+    ->group(function (): void {
+        \Illuminate\Support\Facades\Route::post(
+            '/executions/{executionId}/journal',
+            [\App\Http\Controllers\Api\CheckoutMonoRefund56JournalController::class, 'record']
+        )
+            ->whereNumber('executionId')
+            ->middleware('throttle:5,1')
+            ->name('mono56.record');
+
+        \Illuminate\Support\Facades\Route::get(
+            '/journal/{journalId}',
+            [\App\Http\Controllers\Api\CheckoutMonoRefund56JournalController::class, 'show']
+        )
+            ->whereNumber('journalId')
+            ->middleware('throttle:30,1')
+            ->name('mono56.show');
+    });
