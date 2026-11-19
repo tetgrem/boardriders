@@ -677,3 +677,46 @@ Route::post(
             ->middleware('throttle:10,1')
             ->name('mono53.refund.plan');
     });
+
+// ============================================================
+// BOARDRIDERS #54 — MONO REFUND EXECUTION
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])
+    ->prefix('v1/admin/payments/mono/refunds')
+    ->group(function (): void {
+        \Illuminate\Support\Facades\Route::post(
+            '/plans/{planId}/send',
+            [
+                \App\Http\Controllers\Api\CheckoutMonoRefund54Controller::class,
+                'send',
+            ]
+        )
+            ->whereNumber('planId')
+            ->middleware('throttle:3,1')
+            ->name('mono54.send');
+
+        \Illuminate\Support\Facades\Route::post(
+            '/executions/{executionId}/reconcile',
+            [
+                \App\Http\Controllers\Api\CheckoutMonoRefund54Controller::class,
+                'reconcile',
+            ]
+        )
+            ->whereNumber('executionId')
+            ->middleware('throttle:10,1')
+            ->name('mono54.reconcile');
+
+        \Illuminate\Support\Facades\Route::get(
+            '/executions/{executionId}',
+            [
+                \App\Http\Controllers\Api\CheckoutMonoRefund54Controller::class,
+                'show',
+            ]
+        )
+            ->whereNumber('executionId')
+            ->middleware('throttle:30,1')
+            ->name('mono54.show');
+    });

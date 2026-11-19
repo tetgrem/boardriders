@@ -68,5 +68,11 @@ return [
         'webhook_url' => env('MONO_WEBHOOK_URL'),
         'redirect_url' => env('MONO_REDIRECT_URL'),
     ],
-
+    'refunds' => [
+        'enabled' => env('MONO_REFUNDS_ENABLED', false),
+        'non_fiscalized_merchant_confirmed' => env(
+            'MONO_REFUNDS_NON_FISCALIZED_MERCHANT_CONFIRMED',
+            false
+        ),
+    ],
 ];
