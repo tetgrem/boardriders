@@ -85,6 +85,12 @@ return [
                 false
             ),
         ],
+        'refund_reconciliation' => [
+            'enabled' => env(
+                'MONO_REFUND_RECONCILIATION_ENABLED',
+                false
+            ),
+        ],
     ],
     'refunds' => [
         'enabled' => env('MONO_REFUNDS_ENABLED', false),

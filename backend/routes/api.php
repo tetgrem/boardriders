@@ -836,3 +836,35 @@ Route::post(
             ->middleware('throttle:30,1')
             ->name('rma59.show');
     });
+
+// ============================================================
+// BOARDRIDERS #60 — MONO REFUND FINANCIAL RECONCILIATION
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])
+    ->prefix('v1/admin/payments/mono/refund-reconciliation')
+    ->group(function (): void {
+        \Illuminate\Support\Facades\Route::post(
+            '/capture/{captureReceiptId}',
+            [
+                \App\Http\Controllers\Api\CheckoutMonoRefundReconciliation60Controller::class,
+                'reconcile',
+            ]
+        )
+            ->whereNumber('captureReceiptId')
+            ->middleware('throttle:10,1')
+            ->name('mono60.reconcile');
+
+        \Illuminate\Support\Facades\Route::get(
+            '/{reconciliationId}',
+            [
+                \App\Http\Controllers\Api\CheckoutMonoRefundReconciliation60Controller::class,
+                'show',
+            ]
+        )
+            ->whereNumber('reconciliationId')
+            ->middleware('throttle:30,1')
+            ->name('mono60.show');
+    });
