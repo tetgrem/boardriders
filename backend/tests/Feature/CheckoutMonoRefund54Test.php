@@ -31,6 +31,7 @@ final class CheckoutMonoRefund54Test extends TestCase
     use \Tests\Feature\Concerns\CheckoutMonoRefund56Cases;
     use \Tests\Feature\Concerns\CheckoutMonoRefund57Cases;
     use \Tests\Feature\Concerns\CheckoutRmaInventory58Cases;
+    use \Tests\Feature\Concerns\CheckoutRmaClosure59Cases;
 
 
     private int $variantId;
@@ -134,6 +135,11 @@ final class CheckoutMonoRefund54Test extends TestCase
         );
 
         config()->set(
+            'services.mono_acquiring.rma_close.enabled',
+            true
+        );
+
+        config()->set(
             'services.mono_acquiring.inventory_returns.posting_enabled',
             true
         );
@@ -183,6 +189,7 @@ final class CheckoutMonoRefund54Test extends TestCase
             \App\Services\Pricing\CheckoutMonoRefund57LoyaltyService::APPROVE_ABILITY => 5701,
             \App\Services\Pricing\CheckoutMonoRefund57LoyaltyService::POST_ABILITY => 5702,
             \App\Services\Pricing\CheckoutRmaInventory58Service::POST_ABILITY => 5801,
+            \App\Services\Pricing\CheckoutRmaClosure59Service::CLOSE_ABILITY => 5901,
         ];
 
         foreach ($abilities as $ability => $userId) {

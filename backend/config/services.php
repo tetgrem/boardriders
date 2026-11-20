@@ -79,6 +79,12 @@ return [
                 false
             ),
         ],
+        'rma_close' => [
+            'enabled' => env(
+                'MONO_RMA_CLOSE_ENABLED',
+                false
+            ),
+        ],
     ],
     'refunds' => [
         'enabled' => env('MONO_REFUNDS_ENABLED', false),

@@ -804,3 +804,35 @@ Route::post(
             ->middleware('throttle:30,1')
             ->name('rma58.show');
     });
+
+// ============================================================
+// BOARDRIDERS #59 — OPERATIONAL RMA CLOSURE
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])
+    ->prefix('v1/admin/returns/closure')
+    ->group(function (): void {
+        \Illuminate\Support\Facades\Route::post(
+            '/journal/{journalId}/close',
+            [
+                \App\Http\Controllers\Api\CheckoutRmaClosure59Controller::class,
+                'close',
+            ]
+        )
+            ->whereNumber('journalId')
+            ->middleware('throttle:5,1')
+            ->name('rma59.close');
+
+        \Illuminate\Support\Facades\Route::get(
+            '/{closureId}',
+            [
+                \App\Http\Controllers\Api\CheckoutRmaClosure59Controller::class,
+                'show',
+            ]
+        )
+            ->whereNumber('closureId')
+            ->middleware('throttle:30,1')
+            ->name('rma59.show');
+    });
