@@ -67,6 +67,18 @@ return [
         'public_key_base64' => env('MONO_WEBHOOK_PUBLIC_KEY_BASE64'),
         'webhook_url' => env('MONO_WEBHOOK_URL'),
         'redirect_url' => env('MONO_REDIRECT_URL'),
+        'loyalty_refunds' => [
+            'posting_enabled' => env(
+                'MONO_LOYALTY_REFUNDS_POSTING_ENABLED',
+                false
+            ),
+        ],
+        'inventory_returns' => [
+            'posting_enabled' => env(
+                'MONO_RMA_INVENTORY_POSTING_ENABLED',
+                false
+            ),
+        ],
     ],
     'refunds' => [
         'enabled' => env('MONO_REFUNDS_ENABLED', false),

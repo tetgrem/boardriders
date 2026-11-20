@@ -772,3 +772,35 @@ Route::post(
             ->middleware('throttle:30,1')
             ->name('mono56.show');
     });
+
+// ============================================================
+// BOARDRIDERS #58 — RMA INVENTORY POSTING
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])
+    ->prefix('v1/admin/returns/inventory')
+    ->group(function (): void {
+        \Illuminate\Support\Facades\Route::post(
+            '/journal/{journalId}/post',
+            [
+                \App\Http\Controllers\Api\CheckoutRmaInventory58Controller::class,
+                'post',
+            ]
+        )
+            ->whereNumber('journalId')
+            ->middleware('throttle:5,1')
+            ->name('rma58.post');
+
+        \Illuminate\Support\Facades\Route::get(
+            '/batches/{batchId}',
+            [
+                \App\Http\Controllers\Api\CheckoutRmaInventory58Controller::class,
+                'show',
+            ]
+        )
+            ->whereNumber('batchId')
+            ->middleware('throttle:30,1')
+            ->name('rma58.show');
+    });

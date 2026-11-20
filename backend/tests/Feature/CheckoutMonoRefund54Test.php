@@ -29,6 +29,8 @@ final class CheckoutMonoRefund54Test extends TestCase
 {
     use RefreshDatabase;
     use \Tests\Feature\Concerns\CheckoutMonoRefund56Cases;
+    use \Tests\Feature\Concerns\CheckoutMonoRefund57Cases;
+    use \Tests\Feature\Concerns\CheckoutRmaInventory58Cases;
 
 
     private int $variantId;
@@ -132,6 +134,16 @@ final class CheckoutMonoRefund54Test extends TestCase
         );
 
         config()->set(
+            'services.mono_acquiring.inventory_returns.posting_enabled',
+            true
+        );
+
+        config()->set(
+            'services.mono_acquiring.loyalty_refunds.posting_enabled',
+            true
+        );
+
+        config()->set(
             'services.mono_acquiring.token',
             'mono-refund-test-token'
         );
@@ -168,6 +180,9 @@ final class CheckoutMonoRefund54Test extends TestCase
             CheckoutMonoRefund54Service::RECONCILE_ABILITY => 5402,
             CheckoutMonoRefund54Service::RECOVER_ABILITY => 5403,
             \App\Services\Pricing\CheckoutMonoRefund56JournalService::JOURNAL_ABILITY => 5601,
+            \App\Services\Pricing\CheckoutMonoRefund57LoyaltyService::APPROVE_ABILITY => 5701,
+            \App\Services\Pricing\CheckoutMonoRefund57LoyaltyService::POST_ABILITY => 5702,
+            \App\Services\Pricing\CheckoutRmaInventory58Service::POST_ABILITY => 5801,
         ];
 
         foreach ($abilities as $ability => $userId) {
