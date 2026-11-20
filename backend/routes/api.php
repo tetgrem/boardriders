@@ -868,3 +868,85 @@ Route::post(
             ->middleware('throttle:30,1')
             ->name('mono60.show');
     });
+
+// ============================================================
+// BOARDRIDERS #61 — FISCAL DOCUMENT PREPARATION & PREVIEW
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])
+    ->prefix('v1/admin/fiscal61')
+    ->group(function (): void {
+        $controller = \App\Http\Controllers\Api\Fiscal61Controller::class;
+
+        \Illuminate\Support\Facades\Route::post(
+            '/sales/capture/{captureReceiptId}',
+            [$controller, 'prepareSale']
+        )
+            ->whereNumber('captureReceiptId')
+            ->middleware('throttle:10,1')
+            ->name('fiscal61.sale.prepare');
+
+        \Illuminate\Support\Facades\Route::post(
+            '/refunds/journal/{journalId}',
+            [$controller, 'prepareRefund']
+        )
+            ->whereNumber('journalId')
+            ->middleware('throttle:10,1')
+            ->name('fiscal61.refund.prepare');
+
+        \Illuminate\Support\Facades\Route::get(
+            '/documents',
+            [$controller, 'index']
+        )
+            ->middleware('throttle:30,1')
+            ->name('fiscal61.documents.index');
+
+        \Illuminate\Support\Facades\Route::get(
+            '/documents/{documentId}',
+            [$controller, 'showDocument']
+        )
+            ->whereNumber('documentId')
+            ->middleware('throttle:30,1')
+            ->name('fiscal61.documents.show');
+
+        \Illuminate\Support\Facades\Route::post(
+            '/documents/{documentId}/preview',
+            [$controller, 'requestPreview']
+        )
+            ->whereNumber('documentId')
+            ->middleware('throttle:10,1')
+            ->name('fiscal61.preview.queue');
+
+        \Illuminate\Support\Facades\Route::get(
+            '/documents/{documentId}/preview',
+            [$controller, 'showPreview']
+        )
+            ->whereNumber('documentId')
+            ->middleware('throttle:30,1')
+            ->name('fiscal61.preview.show');
+
+        \Illuminate\Support\Facades\Route::post(
+            '/documents/{documentId}/incidents',
+            [$controller, 'recordIncident']
+        )
+            ->whereNumber('documentId')
+            ->middleware('throttle:10,1')
+            ->name('fiscal61.incidents.store');
+
+        \Illuminate\Support\Facades\Route::get(
+            '/documents/{documentId}/incidents',
+            [$controller, 'incidents']
+        )
+            ->whereNumber('documentId')
+            ->middleware('throttle:30,1')
+            ->name('fiscal61.incidents.index');
+
+        \Illuminate\Support\Facades\Route::get(
+            '/statistics',
+            [$controller, 'statistics']
+        )
+            ->middleware('throttle:30,1')
+            ->name('fiscal61.statistics');
+    });

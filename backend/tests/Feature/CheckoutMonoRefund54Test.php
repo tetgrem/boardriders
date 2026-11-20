@@ -33,6 +33,7 @@ final class CheckoutMonoRefund54Test extends TestCase
     use \Tests\Feature\Concerns\CheckoutRmaInventory58Cases;
     use \Tests\Feature\Concerns\CheckoutRmaClosure59Cases;
     use \Tests\Feature\Concerns\CheckoutMonoRefundReconciliation60Cases;
+    use \Tests\Feature\Concerns\Fiscal61Cases;
 
 
     private int $variantId;
@@ -139,7 +140,8 @@ final class CheckoutMonoRefund54Test extends TestCase
             'services.mono_acquiring.rma_close.enabled',
             true
         );
-
+        config()->set('fiscal61.enabled', true);
+        config()->set('fiscal61.preview_enabled', true);
         config()->set(
             'services.mono_acquiring.inventory_returns.posting_enabled',
             true
@@ -196,6 +198,10 @@ final class CheckoutMonoRefund54Test extends TestCase
             \App\Services\Pricing\CheckoutRmaClosure59Service::CLOSE_ABILITY => 5901,
             \App\Services\Pricing\CheckoutMonoRefundReconciliation60Service::RUN_ABILITY => 6001,
             \App\Services\Pricing\CheckoutMonoRefundReconciliation60Service::VIEW_ABILITY => 6002,
+            \App\Services\Fiscal61\Fiscal61Authorization::PREPARE => 6101,
+            \App\Services\Fiscal61\Fiscal61Authorization::SIMULATE => 6102,
+            \App\Services\Fiscal61\Fiscal61Authorization::VIEW => 6103,
+            \App\Services\Fiscal61\Fiscal61Authorization::INCIDENT => 6104,
         ];
 
         foreach ($abilities as $ability => $userId) {
