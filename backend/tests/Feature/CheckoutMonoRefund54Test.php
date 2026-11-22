@@ -35,6 +35,7 @@ final class CheckoutMonoRefund54Test extends TestCase
     use \Tests\Feature\Concerns\CheckoutMonoRefundReconciliation60Cases;
     use \Tests\Feature\Concerns\Fiscal61Cases;
     use \Tests\Feature\Concerns\Fiscal62Cases;
+    use \Tests\Feature\Concerns\Fiscal63Cases;
 
 
     private int $variantId;
@@ -147,7 +148,8 @@ final class CheckoutMonoRefund54Test extends TestCase
             'services.mono_acquiring.inventory_returns.posting_enabled',
             true
         );
-
+        config()->set('fiscal63.enabled', true);
+        config()->set('fiscal63.provider_poll_enabled', false);
         config()->set(
             'services.mono_acquiring.loyalty_refunds.posting_enabled',
             true
@@ -208,6 +210,13 @@ final class CheckoutMonoRefund54Test extends TestCase
             \App\Services\Fiscal62\Fiscal62Access::SEND => 6203,
             \App\Services\Fiscal62\Fiscal62Access::POLL => 6204,
             \App\Services\Fiscal62\Fiscal62Access::VIEW => 6205,
+            \App\Services\Fiscal63\Fiscal63Access::MONITOR => 6301,
+            \App\Services\Fiscal63\Fiscal63Access::ACK => 6302,
+            \App\Services\Fiscal63\Fiscal63Access::NOTE => 6303,
+            \App\Services\Fiscal63\Fiscal63Access::RECOVER => 6304,
+            \App\Services\Fiscal63\Fiscal63Access::POLL => 6305,
+            \App\Services\Fiscal63\Fiscal63Access::CLOSE => 6306,
+            \App\Services\Fiscal63\Fiscal63Access::VIEW => 6307,
         ];
 
         foreach ($abilities as $ability => $userId) {

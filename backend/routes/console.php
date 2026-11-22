@@ -41,3 +41,18 @@ Schedule::command('cod:correction-sla --limit=50')
 Schedule::command('cod:ttn-lifecycle --limit=50')
     ->everyFiveMinutes()
     ->withoutOverlapping(15);
+
+// ============================================================
+// BOARDRIDERS #63 — PERIODIC FISCAL INCIDENT SCAN
+// ============================================================
+
+if (
+    config('fiscal63.enabled') === true
+    && (int) config('fiscal63.system_actor_id') > 0
+) {
+    \Illuminate\Support\Facades\Schedule::command(
+        'fiscal63:scan --limit=100'
+    )
+        ->everyFifteenMinutes()
+        ->withoutOverlapping();
+}

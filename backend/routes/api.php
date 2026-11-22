@@ -1017,3 +1017,84 @@ Route::post(
             ->middleware('throttle:30,1')
             ->name('fiscal62.statistics');
     });
+
+// ============================================================
+// BOARDRIDERS #63 — FISCAL INCIDENT MONITORING AND TRIAGE
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])
+    ->prefix('v1/admin/fiscal63')
+    ->group(function (): void {
+        $controller = \App\Http\Controllers\Api\Fiscal63Controller::class;
+
+        \Illuminate\Support\Facades\Route::post(
+            '/scan',
+            [$controller, 'scan']
+        )
+            ->middleware('throttle:5,1')
+            ->name('fiscal63.scan');
+
+        \Illuminate\Support\Facades\Route::get(
+            '/dashboard',
+            [$controller, 'dashboard']
+        )
+            ->middleware('throttle:30,1')
+            ->name('fiscal63.dashboard');
+
+        \Illuminate\Support\Facades\Route::get(
+            '/cases',
+            [$controller, 'index']
+        )
+            ->middleware('throttle:30,1')
+            ->name('fiscal63.queue');
+
+        \Illuminate\Support\Facades\Route::get(
+            '/cases/{caseId}',
+            [$controller, 'show']
+        )
+            ->whereNumber('caseId')
+            ->middleware('throttle:30,1')
+            ->name('fiscal63.show');
+
+        \Illuminate\Support\Facades\Route::post(
+            '/cases/{caseId}/acknowledge',
+            [$controller, 'acknowledge']
+        )
+            ->whereNumber('caseId')
+            ->middleware('throttle:10,1')
+            ->name('fiscal63.ack');
+
+        \Illuminate\Support\Facades\Route::post(
+            '/cases/{caseId}/notes',
+            [$controller, 'note']
+        )
+            ->whereNumber('caseId')
+            ->middleware('throttle:20,1')
+            ->name('fiscal63.note');
+
+        \Illuminate\Support\Facades\Route::post(
+            '/cases/{caseId}/recover',
+            [$controller, 'recover']
+        )
+            ->whereNumber('caseId')
+            ->middleware('throttle:5,1')
+            ->name('fiscal63.recover');
+
+        \Illuminate\Support\Facades\Route::post(
+            '/cases/{caseId}/poll',
+            [$controller, 'poll']
+        )
+            ->whereNumber('caseId')
+            ->middleware('throttle:10,1')
+            ->name('fiscal63.poll');
+
+        \Illuminate\Support\Facades\Route::post(
+            '/cases/{caseId}/close',
+            [$controller, 'close']
+        )
+            ->whereNumber('caseId')
+            ->middleware('throttle:10,1')
+            ->name('fiscal63.close');
+    });
