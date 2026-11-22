@@ -1098,3 +1098,41 @@ Route::post(
             ->middleware('throttle:10,1')
             ->name('fiscal63.close');
     });
+
+// ============================================================
+// BOARDRIDERS #64 — UNIFIED CRM API
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])
+    ->prefix('v1/admin/crm64')
+    ->group(function (): void {
+        $controller = \App\Http\Controllers\Api\Crm64Controller::class;
+
+        Route::get('/dashboard', [$controller, 'dashboard'])
+            ->name('crm64.dashboard');
+
+        Route::get('/orders', [$controller, 'index'])
+            ->name('crm64.orders.index');
+
+        Route::get('/orders/{orderKey}', [$controller, 'show'])
+            ->whereUuid('orderKey')
+            ->name('crm64.orders.show');
+
+        Route::get('/orders/{orderKey}/finance', [$controller, 'finance'])
+            ->whereUuid('orderKey')
+            ->name('crm64.orders.finance');
+
+        Route::get('/orders/{orderKey}/timeline', [$controller, 'timeline'])
+            ->whereUuid('orderKey')
+            ->name('crm64.orders.timeline');
+
+        Route::get('/orders/{orderKey}/access', [$controller, 'accessHistory'])
+            ->whereUuid('orderKey')
+            ->name('crm64.orders.access');
+
+        Route::post('/orders/{orderKey}/notes', [$controller, 'note'])
+            ->whereUuid('orderKey')
+            ->name('crm64.orders.notes');
+    });

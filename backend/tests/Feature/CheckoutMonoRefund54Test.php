@@ -36,6 +36,7 @@ final class CheckoutMonoRefund54Test extends TestCase
     use \Tests\Feature\Concerns\Fiscal61Cases;
     use \Tests\Feature\Concerns\Fiscal62Cases;
     use \Tests\Feature\Concerns\Fiscal63Cases;
+    use \Tests\Feature\Concerns\Crm64Cases;
 
 
     private int $variantId;
@@ -154,6 +155,7 @@ final class CheckoutMonoRefund54Test extends TestCase
             'services.mono_acquiring.loyalty_refunds.posting_enabled',
             true
         );
+        config()->set('crm64.enabled', true);
         config()->set(
             'services.mono_acquiring.refund_reconciliation.enabled',
             true
@@ -217,6 +219,10 @@ final class CheckoutMonoRefund54Test extends TestCase
             \App\Services\Fiscal63\Fiscal63Access::POLL => 6305,
             \App\Services\Fiscal63\Fiscal63Access::CLOSE => 6306,
             \App\Services\Fiscal63\Fiscal63Access::VIEW => 6307,
+            \App\Services\Crm64\Crm64Access::FINANCE => 6402,
+            \App\Services\Crm64\Crm64Access::FISCAL => 6403,
+            \App\Services\Crm64\Crm64Access::NOTES => 6404,
+            \App\Services\Crm64\Crm64Access::REPORT => 6405,
         ];
 
         foreach ($abilities as $ability => $userId) {
@@ -226,6 +232,15 @@ final class CheckoutMonoRefund54Test extends TestCase
                     (int) $user->getAuthIdentifier() === $userId
             );
         }
+
+        Gate::define(
+            \App\Services\Crm64\Crm64Access::VIEW,
+            static fn ($user): bool => in_array(
+                (int) $user->getAuthIdentifier(),
+                [6401, 6402, 6403, 6404, 6405],
+                true
+            )
+        );
 
         Http::preventStrayRequests();
     }
