@@ -1173,3 +1173,23 @@ Route::post(
             ->middleware('throttle:10,1')
             ->name('crm65.logout');
     });
+
+// BOARDRIDERS BLOCK 66 — INTERNAL CRM TASKS
+Route::middleware(['auth:sanctum'])
+    ->prefix('v1/admin/crm66')
+    ->group(function (): void {
+        Route::get('/orders/{orderKey}/tasks',
+            [\App\Http\Controllers\Api\Crm66TasksController::class, 'index'])
+            ->whereUuid('orderKey')->middleware('throttle:30,1')->name('crm66.tasks.index');
+        Route::post('/orders/{orderKey}/tasks',
+            [\App\Http\Controllers\Api\Crm66TasksController::class, 'create'])
+            ->whereUuid('orderKey')->middleware('throttle:10,1')->name('crm66.tasks.create');
+        Route::post('/orders/{orderKey}/tasks/{taskId}/action',
+            [\App\Http\Controllers\Api\Crm66TasksController::class, 'action'])
+            ->whereUuid('orderKey')->whereNumber('taskId')
+            ->middleware('throttle:20,1')->name('crm66.tasks.action');
+        Route::get('/orders/{orderKey}/tasks/{taskId}/history',
+            [\App\Http\Controllers\Api\Crm66TasksController::class, 'history'])
+            ->whereUuid('orderKey')->whereNumber('taskId')
+            ->middleware('throttle:30,1')->name('crm66.tasks.history');
+    });

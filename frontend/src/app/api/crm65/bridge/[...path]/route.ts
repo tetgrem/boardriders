@@ -13,6 +13,20 @@ function route(path: string[], method: "GET" | "POST"): string | null {
   if (method === "GET" && path.length === 1 && path[0] === "dashboard") return "dashboard";
   if (method === "GET" && path.length === 1 && path[0] === "orders") return "orders";
   if (path[0] !== "orders" || path.length < 2 || !uuid.test(path[1])) return null;
+  if (path.length >= 3 && path[2] === "tasks") {
+    if (path.length === 3 && (method === "GET" || method === "POST")) {
+      return `crm66/orders/${path[1]}/tasks`;
+    }
+    if (path.length === 5 && /^[1-9]\d{0,15}$/.test(path[3])) {
+      if (method === "GET" && path[4] === "history") {
+        return `crm66/orders/${path[1]}/tasks/${path[3]}/history`;
+      }
+      if (method === "POST" && path[4] === "action") {
+        return `crm66/orders/${path[1]}/tasks/${path[3]}/action`;
+      }
+    }
+    return null;
+  }
   if (method === "GET" && path.length === 2) return `orders/${path[1]}`;
   if (method === "GET" && path.length === 3 &&
       ["finance", "timeline", "access"].includes(path[2])) {
@@ -52,8 +66,9 @@ async function proxy(request: Request, context: Context, method: "GET" | "POST")
     if (body.length > 1600) return NextResponse.json({ message: "Too large" }, { status: 413 });
   }
   const suffix = query.size ? `?${query}` : "";
+  const apiRoute = path.startsWith("crm66/") ? path : `crm64/${path}`;
   try {
-    const response = await fetch(`${laravel}/api/v1/admin/crm64/${path}${suffix}`, {
+    const response = await fetch(`${laravel}/api/v1/admin/${apiRoute}${suffix}`, {
       method,
       headers: {
         Authorization: `Bearer ${session.token}`,

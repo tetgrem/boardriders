@@ -4,9 +4,10 @@ import Link from "next/link";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {CrmError, crm, money, statusLabel, when, type OrderCard, type TimelineItem } from "@/lib/crm65/client";
 import type { StaffIdentity } from "@/lib/crm65/session";
+import TaskPanel66 from "@/components/crm65/TaskPanel66";
 import { useRouter } from "next/navigation";
 
-type Section = "overview" | "finance" | "returns" | "delivery" | "fiscal" | "timeline" | "notes" | "audit";
+type Section = "overview" | "tasks" | "finance" | "returns" | "delivery" | "fiscal" | "timeline" | "notes" | "audit";
 type Financial = {
   financial_snapshot: null | { goods_payable_minor: number; currency_code: string; lines: unknown[] };
   accepted_capture_total_minor: number;
@@ -35,6 +36,7 @@ export default function OrderClient({ orderKey, staff }: { orderKey: string; sta
   const canFiscal = staff.abilities.includes("crm64.fiscal.view");
   const canNotes = staff.abilities.includes("crm64.notes.write");
   const canReport = staff.abilities.includes("crm64.reporting.view");
+  const canTasks = staff.abilities.includes("crm66.tasks.view");
 
   const reload = useCallback(() => crm<OrderCard>(`orders/${orderKey}`), [orderKey]);
   useEffect(() => {
@@ -105,6 +107,7 @@ export default function OrderClient({ orderKey, staff }: { orderKey: string; sta
 
   const tabs: Array<[Section, string, boolean]> = [
     ["overview", "Обзор", true], ["finance", "Финансы", canFinance],
+    ["tasks", "Задачи", canTasks],
     ["returns", "Возвраты", true], ["delivery", "Доставка", true],
     ["fiscal", "Фискализация", canFiscal], ["timeline", "Хронология", true],
     ["notes", "Заметки", true], ["audit", "История доступа", canReport],
@@ -123,6 +126,7 @@ export default function OrderClient({ orderKey, staff }: { orderKey: string; sta
     {card && <><nav className="crm65-tabs" role="tablist" aria-label="Разделы заказа">{tabs.filter(t => t[2]).map(([id, text]) => <button key={id} type="button" role="tab" aria-selected={section === id} className={section === id ? "active" : ""} onClick={() => setSection(id)}>{text}</button>)}</nav>
       <section className="crm65-panel crm65-detail-panel">
         {section === "overview" && <><h2>Информация о заказе</h2><div className="crm65-facts"><Fact label="Номер заказа" value={card.order_key} /><Fact label="Статус оплаты" value={statusLabel(card.payment_status)} /><Fact label="Возвратов RMA" value={String(card.returns.case_count)} /><Fact label="ТТН" value={String(card.delivery.tracking_count)} /><Fact label="Финансы" value={canFinance ? "Доступны" : "Ограничен доступ"} /><Fact label="Фискализация" value={canFiscal ? "Доступна" : "Ограничен доступ"} /></div><div className="crm65-soft-note">Это операционная карточка. Наличие события ТТН не означает вручения посылки, а одобрение RMA не означает возврат денег.</div></>}
+        {section === "tasks" && canTasks && <TaskPanel66 orderKey={orderKey} staff={staff} />}
         {section === "finance" && canFinance && finance && <><h2>Финансовая история</h2>{finance.financial_snapshot ? <div className="crm65-money-grid"><Metric title="Стоимость товаров" amount={money(finance.financial_snapshot.goods_payable_minor, finance.financial_snapshot.currency_code)} /><Metric title="Подтверждённая оплата" amount={money(finance.accepted_capture_total_minor)} /><Metric title="Возврат подтверждён провайдером" amount={money(finance.provider_confirmed_refund_minor)} /><Metric title="Возврат в журнале" amount={money(finance.journaled_refund_minor)} /></div> : <p className="crm65-muted">Финансовый snapshot отсутствует.</p>}<h3>Зачисления</h3>{finance.captures.length === 0 ? <Empty /> : finance.captures.map(x => <div className="crm65-listrow" key={x.receipt_id}><div><strong>Capture #{x.receipt_id}</strong><small>{x.provider_code}</small></div><span>{money(x.amount_minor, x.currency_code)} · {x.accepted_as_paid ? "Принят" : "Ожидает проверки"}</span></div>)}<h3>Возвраты</h3>{finance.refunds.length === 0 ? <Empty /> : finance.refunds.map(x => <div className="crm65-listrow" key={x.execution_id}><div><strong>Возврат #{x.execution_id}</strong><small>Журнал: {x.journal_id ?? "пока нет"}</small></div><span>{money(x.amount_minor)} · {statusLabel(x.status)}</span></div>)}<p className="crm65-soft-note">Подтверждение провайдера не доказывает окончательное зачисление на карту клиента.</p></>}
         {section === "returns" && <><h2>Возвраты (RMA)</h2>{card.returns.restricted ? <Restricted /> : card.returns.items.length === 0 ? <Empty /> : card.returns.items.map(r => <div className="crm65-listrow" key={r.case_id}><div><strong>RMA #{r.case_id}</strong><small>Причина: {r.reason_code}; количество: {r.requested_qty}</small></div><span className="crm65-pill">{statusLabel(r.workflow)}</span></div>)}<p className="crm65-soft-note">Решение по возврату не подтверждает фактическую выплату.</p></>}
         {section === "delivery" && <><h2>Доставка / Новая почта</h2>{card.delivery.restricted ? <Restricted /> : card.delivery.items.length === 0 ? <Empty /> : card.delivery.items.map(d => <div className="crm65-listrow" key={d.tracking_key}><div><strong>{d.tracking_key}</strong><small>Действие: {statusLabel(d.action_code)}</small></div><span className={`crm65-pill ${d.needs_review ? "is-warning" : ""}`}>{statusLabel(d.observed_state)}</span></div>)}<p className="crm65-soft-note">Данные являются наблюдениями перевозчика; вручение и наложенный платёж отдельно не подтверждены.</p></>}

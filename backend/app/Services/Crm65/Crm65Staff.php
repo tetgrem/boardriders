@@ -9,7 +9,7 @@ use DomainException;
 use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\PersonalAccessToken;
 
-final class Crm65Staff
+final class     Crm65Staff
 {
     private const PERMISSIONS = [
         'crm64.orders.view',
@@ -19,15 +19,17 @@ final class Crm65Staff
         'crm64.reporting.view',
         'orders.returns.view',
         'cod.operations.ttn_lifecycle.view',
+        'crm66.tasks.view',
+        'crm66.tasks.manage',
     ];
 
     private const ROLES = [
-        'owner' => [0, 1, 2, 3, 4, 5, 6],
-        'manager' => [0, 3, 4, 5, 6],
-        'support' => [0, 3, 5, 6],
-        'finance' => [0, 1, 3, 4, 5],
-        'fiscal' => [0, 2, 3, 4],
-        'viewer' => [0],
+        'owner' => [0, 1, 2, 3, 4, 5, 6, 7, 8],
+        'manager' => [0, 3, 4, 5, 6, 7, 8],
+        'support' => [0, 3, 5, 6, 7, 8],
+        'finance' => [0, 1, 3, 4, 5, 7],
+        'fiscal' => [0, 2, 3, 4, 7],
+        'viewer' => [0, 7],
     ];
 
     public static function permissionsForRole(string $role): array
