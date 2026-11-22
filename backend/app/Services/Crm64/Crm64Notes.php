@@ -7,6 +7,7 @@ namespace App\Services\Crm64;
 use App\Services\Pricing\CheckoutOrderReturnSigner;
 use DomainException;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Support\Str;
 use RuntimeException;
 
@@ -28,6 +29,11 @@ final class Crm64Notes
         if (!in_array($category, ['service','finance','delivery','return','fiscal'], true)
             || mb_strlen($body) < 4 || mb_strlen($body) > 1000) {
             throw new DomainException('Invalid CRM note category or content');
+        }
+        if (($category === 'finance' && !$this->access->has(Crm64Access::FINANCE))
+            || ($category === 'fiscal' && !$this->access->has(Crm64Access::FISCAL))
+            || ($category === 'return' && !$this->access->has(\App\Services\Pricing\CheckoutOrderReturnService::VIEW_ABILITY))) {
+            throw new AuthorizationException('CRM note category access denied');
         }
         return DB::transaction(function () use ($orderKey, $operationKey, $category, $body, $actor): array {
             $order = DB::table('orders')->where('order_key', strtolower($orderKey))
@@ -61,12 +67,24 @@ final class Crm64Notes
 
     public function history(int $orderId, int $limit = 50): array
     {
+        $this->access->actor(Crm64Access::VIEW);
         if ($limit < 1 || $limit > 100) {
             throw new DomainException('Invalid CRM note history limit');
         }
-        return DB::table('checkout_crm_notes64')->where('order_id', $orderId)
-            ->orderByDesc('id')->limit($limit)->get()
-            ->map(fn (object $row): array => $this->verify($row))->all();
+
+        $excluded = [];
+        if (!$this->access->has(Crm64Access::FINANCE)) $excluded[] = 'finance';
+        if (!$this->access->has(Crm64Access::FISCAL)) $excluded[] = 'fiscal';
+        if (!$this->access->has(\App\Services\Pricing\CheckoutOrderReturnService::VIEW_ABILITY)) $excluded[] = 'return';
+
+        return DB::table('checkout_crm_notes64')
+            ->where('order_id', $orderId)
+            ->when($excluded !== [], fn ($q) => $q->whereNotIn('category', $excluded))
+            ->orderByDesc('id')
+            ->limit($limit)
+            ->get()
+            ->map(fn (object $row): array => $this->verify($row))
+            ->all();
     }
 
     private function verify(object $row): array

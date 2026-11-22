@@ -37,6 +37,7 @@ final class CheckoutMonoRefund54Test extends TestCase
     use \Tests\Feature\Concerns\Fiscal62Cases;
     use \Tests\Feature\Concerns\Fiscal63Cases;
     use \Tests\Feature\Concerns\Crm64Cases;
+    use \Tests\Feature\Concerns\Crm65Crm64SecurityCases;
 
 
     private int $variantId;

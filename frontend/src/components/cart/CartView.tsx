@@ -62,6 +62,12 @@ type RemovedItem = {
 
 const UNDO_DURATION_MS = 8000;
 
+function undoExpiryAfterRemoval(): number {
+    return Date.now() + UNDO_DURATION_MS;
+}
+
+const EMPTY_QUOTES: ItemQuote[] = [];
+
 type Props = {
     locale: Locale;
 };
@@ -188,11 +194,11 @@ export default function CartView({ locale }: Props) {
 
     const items = useCartItems();
 
-    const [quotes, setQuotes] = useState<ItemQuote[]>([]);
-
-    const [status, setStatus] = useState<
-        "loading" | "ready" | "error"
-    >("loading");
+    const [quoteResult, setQuoteResult] = useState<{
+        key: string;
+        quotes: ItemQuote[];
+        status: "ready" | "error";
+    } | null>(null);
 
     const [refresh, setRefresh] = useState(0);
 
@@ -209,25 +215,38 @@ export default function CartView({ locale }: Props) {
         .map((item) => item.variantId)
         .join(",");
 
+    const quoteKey = `${locale}:${refresh}:${itemIds}`;
+
+    const currentQuote =
+        quoteResult?.key === quoteKey
+            ? quoteResult
+            : null;
+
+    const quotes =
+        currentQuote?.quotes ?? EMPTY_QUOTES;
+
+    const status: "loading" | "ready" | "error" =
+        !itemIds
+            ? "ready"
+            : currentQuote?.status ?? "loading";
+
     // ========================================
     // ОТРИМАННЯ ДАНИХ ІЗ LARAVEL
     // ========================================
 
     useEffect(() => {
         if (!itemIds) {
-            setQuotes([]);
-            setStatus("ready");
             return;
         }
 
         const controller = new AbortController();
 
-        setStatus("loading");
-
-        const requested = itemIds.split(",").map((id) => ({
-            variant_id: Number(id),
-            quantity: 1,
-        }));
+        const requested = itemIds
+            .split(",")
+            .map((id) => ({
+                variant_id: Number(id),
+                quantity: 1,
+            }));
 
         fetch("/api/cart/preview", {
             method: "POST",
@@ -246,32 +265,49 @@ export default function CartView({ locale }: Props) {
         })
             .then(async (response) => {
                 if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}`);
+                    throw new Error(
+                        `HTTP ${response.status}`
+                    );
                 }
 
                 const data =
                     (await response.json()) as QuoteResponse;
 
                 if (!Array.isArray(data.data)) {
-                    throw new Error("Invalid cart response");
+                    throw new Error(
+                        "Invalid cart response"
+                    );
                 }
 
                 return data.data;
             })
             .then((data) => {
-                if (controller.signal.aborted) return;
+                if (controller.signal.aborted) {
+                    return;
+                }
 
-                setQuotes(data);
-                setStatus("ready");
+                setQuoteResult({
+                    key: quoteKey,
+                    quotes: data,
+                    status: "ready",
+                });
             })
             .catch(() => {
-                if (!controller.signal.aborted) {
-                    setStatus("error");
+                if (controller.signal.aborted) {
+                    return;
                 }
+
+                setQuoteResult({
+                    key: quoteKey,
+                    quotes: [],
+                    status: "error",
+                });
             });
 
-        return () => controller.abort();
-    }, [itemIds, locale, refresh]);
+        return () => {
+            controller.abort();
+        };
+    }, [itemIds, locale, quoteKey]);
 
     // ========================================
     // ТАЙМЕР ПОВЕРНЕННЯ ВИДАЛЕНОГО ТОВАРУ
@@ -387,7 +423,7 @@ export default function CartView({ locale }: Props) {
                 item: { ...item },
                 position,
                 name,
-                expiresAt: Date.now() + UNDO_DURATION_MS,
+                expiresAt: undoExpiryAfterRemoval(),
             });
 
             setUndoError(false);

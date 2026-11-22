@@ -147,13 +147,24 @@ export function formatMoney(
     currency: string,
     _locale: Locale
 ): string {
-    const symbols: Record<string, string> = {
-        UAH: "₴",
-        USD: "$",
-        EUR: "€",
+    const symbols: Record<
+        Locale,
+        Record<string, string>
+    > = {
+        uk: {
+            UAH: "₴",
+            USD: "$",
+            EUR: "€",
+        },
+        ru: {
+            UAH: "₴",
+            USD: "$",
+            EUR: "€",
+        },
     };
 
-    const symbol = symbols[currency] ?? currency;
+    const symbol =
+        symbols[_locale][currency] ?? currency;
 
     const negative = amountMinor < 0 ? "-" : "";
     const absolute = Math.abs(amountMinor);

@@ -1136,3 +1136,40 @@ Route::post(
             ->whereUuid('orderKey')
             ->name('crm64.orders.notes');
     });
+
+// ============================================================
+// BOARDRIDERS #65 — STAFF AUTHENTICATION
+// ============================================================
+
+\Illuminate\Support\Facades\Route::post(
+    '/v1/admin/crm65/session',
+    [
+        \App\Http\Controllers\Api\Crm65SessionController::class,
+        'login',
+    ]
+)
+    ->middleware('throttle:8,1')
+    ->name('crm65.login');
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])
+    ->prefix('v1/admin/crm65')
+    ->group(function (): void {
+        $controller =
+            \App\Http\Controllers\Api\Crm65SessionController::class;
+
+        \Illuminate\Support\Facades\Route::get(
+            '/me',
+            [$controller, 'me']
+        )
+            ->middleware('throttle:60,1')
+            ->name('crm65.me');
+
+        \Illuminate\Support\Facades\Route::delete(
+            '/session',
+            [$controller, 'logout']
+        )
+            ->middleware('throttle:10,1')
+            ->name('crm65.logout');
+    });
