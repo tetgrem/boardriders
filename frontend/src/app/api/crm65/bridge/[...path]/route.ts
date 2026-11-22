@@ -6,10 +6,12 @@ import { allowedOrigin, laravel, readSession } from "@/lib/crm65/session";
 type Context = { params: Promise<{ path: string[] }> };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const allowedFilters = new Set([
-  "limit", "before_id", "order_key", "payment_status", "has_rma", "has_fiscal_issue",
+  "limit", "before_id", "order_key", "payment_status", "has_rma", "has_fiscal_issue", "scope", "status", "priority"
 ]);
 
 function route(path: string[], method: "GET" | "POST"): string | null {
+  if (method === "GET" && path.length === 1 && path[0] === "inbox")
+    return "crm67/inbox";
   if (method === "GET" && path.length === 1 && path[0] === "dashboard") return "dashboard";
   if (method === "GET" && path.length === 1 && path[0] === "orders") return "orders";
   if (path[0] !== "orders" || path.length < 2 || !uuid.test(path[1])) return null;
@@ -66,7 +68,8 @@ async function proxy(request: Request, context: Context, method: "GET" | "POST")
     if (body.length > 1600) return NextResponse.json({ message: "Too large" }, { status: 413 });
   }
   const suffix = query.size ? `?${query}` : "";
-  const apiRoute = path.startsWith("crm66/") ? path : `crm64/${path}`;
+  const apiRoute = path.startsWith("crm66/") || path.startsWith("crm67/")
+      ? path : `crm64/${path}`;
   try {
     const response = await fetch(`${laravel}/api/v1/admin/${apiRoute}${suffix}`, {
       method,

@@ -183,6 +183,17 @@ final class Crm66Tasks
                 'created_at' => (string) $event->created_at,
             ])->all();
     }
+    /** Verify projections before cross-order CRM reads. */
+    public function verifiedBatch(array $rows): array
+    {
+        $this->actor(self::VIEW);
+
+        return array_map(
+            fn (object $row): array => $this->verified($row),
+            $rows
+        );
+    }
+
 
     private function actor(string $ability): int
     {

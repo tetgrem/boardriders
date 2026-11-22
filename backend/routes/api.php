@@ -1193,3 +1193,15 @@ Route::middleware(['auth:sanctum'])
             ->whereUuid('orderKey')->whereNumber('taskId')
             ->middleware('throttle:30,1')->name('crm66.tasks.history');
     });
+
+// BOARDRIDERS BLOCK 67 — SHARED CRM TASK INBOX
+Route::middleware(['auth:sanctum'])
+    ->prefix('v1/admin/crm67')
+    ->group(function (): void {
+        Route::get('/inbox', [
+            \App\Http\Controllers\Api\Crm67InboxController::class,
+            'index',
+        ])
+            ->middleware('throttle:30,1')
+            ->name('crm67.inbox.index');
+    });

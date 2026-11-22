@@ -34,6 +34,16 @@ export default function CrmFrame({ staff, children }: {
         <nav className="crm65-nav" aria-label="Навигация CRM">
           {canReport && <Link href="/admin" onClick={() => setMenu(false)} className={pathname === "/admin" ? "active" : ""}>◫ <span>Обзор</span></Link>}
           <Link href="/admin/orders" onClick={() => setMenu(false)} className={pathname.startsWith("/admin/orders") ? "active" : ""}>▤ <span>Заказы</span></Link>
+
+          {staff.abilities.includes("crm66.tasks.manage") && (
+              <Link
+                  href="/admin/tasks"
+                  onClick={() => setMenu(false)}
+                  className={pathname.startsWith("/admin/tasks") ? "active" : ""}
+              >
+                ◉ <span>Задачи</span>
+              </Link>
+          )}
         </nav>
         <div className="crm65-sidebar-bottom">
           <p className="crm65-sidebar-hint">Финансовые и фискальные операции доступны только на чтение. Все действия учитываются сервером.</p>

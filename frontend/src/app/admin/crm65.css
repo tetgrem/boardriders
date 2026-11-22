@@ -162,3 +162,162 @@
 .crm66-history small { color:#929bab; }
 @media(max-width:850px) { .crm66-create { grid-template-columns:1fr; } }
 @media(max-width:600px) { .crm66-heading { flex-direction:column; } .crm66-history>div { flex-direction:column; gap:2px; } }
+
+/* ============================================================
+   BOARDRIDERS — BLOCK 67
+   SHARED CRM TASK INBOX
+   ============================================================ */
+
+.crm67-scopes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 0 0 17px;
+}
+
+.crm67-scopes button {
+    background: #252a33;
+    color: #b7c0cb;
+    border: 1px solid #38404a;
+    border-radius: 9px;
+    padding: 11px 17px;
+    font-weight: 700;
+}
+
+.crm67-scopes button.active {
+    border-color: #fe753d;
+    color: #fff;
+    background: #422e2a;
+}
+
+.crm67-filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 14px;
+    margin-bottom: 22px;
+}
+
+.crm67-filters label {
+    min-width: 180px;
+}
+
+.crm67-filters > span {
+    flex: 1;
+    min-width: 240px;
+    font-size: 11px;
+}
+
+.crm67-summary {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 10px;
+    margin-bottom: 22px;
+}
+
+.crm67-metric {
+    background: #1a1e26;
+    border: 1px solid #2b303b;
+    padding: 19px 15px;
+    border-radius: 11px;
+    display: grid;
+    gap: 12px;
+}
+
+.crm67-metric small {
+    color: #9ba4b1;
+    font-size: 11px;
+}
+
+.crm67-metric strong {
+    color: #f4f5f7;
+    font-size: 29px;
+}
+
+.crm67-list {
+    padding: 0;
+}
+
+.crm67-list .crm65-panel-head {
+    padding: 20px 24px;
+    border-bottom: 1px solid #343945;
+}
+
+.crm67-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 19px 24px;
+    border-bottom: 1px solid #343945;
+}
+
+.crm67-main {
+    min-width: 0;
+}
+
+.crm67-titleline {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+
+.crm67-titleline strong {
+    overflow-wrap: anywhere;
+}
+
+.crm67-main p {
+    color: #aeb6c1;
+    font-size: 12px;
+    margin: 8px 0 3px;
+}
+
+.crm67-main small {
+    color: #818b99;
+    font-size: 11px;
+}
+
+.crm67-open {
+    flex-shrink: 0;
+}
+
+.crm67-note {
+    margin-top: 17px;
+    font-size: 11px;
+}
+
+/* Tablet */
+
+@media (max-width: 1250px) {
+    .crm67-summary {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+/* Mobile */
+
+@media (max-width: 650px) {
+    .crm67-summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .crm67-row {
+        flex-direction: column;
+        align-items: flex-start;
+        padding: 16px;
+    }
+
+    .crm67-open {
+        width: 100%;
+    }
+
+    .crm67-list .crm65-panel-head {
+        padding: 16px;
+    }
+
+    .crm67-filters label {
+        flex: 1;
+        min-width: 135px;
+    }
+}
