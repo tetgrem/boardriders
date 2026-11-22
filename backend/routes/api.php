@@ -950,3 +950,70 @@ Route::post(
             ->middleware('throttle:30,1')
             ->name('fiscal61.statistics');
     });
+
+
+// ============================================================
+// BOARDRIDERS #62 — CHECKBOX PRRO INTEGRATION
+// ============================================================
+
+\Illuminate\Support\Facades\Route::middleware([
+    'auth:sanctum',
+])
+    ->prefix('v1/admin/fiscal62')
+    ->group(function (): void {
+        $controller = \App\Http\Controllers\Api\Fiscal62Controller::class;
+
+        \Illuminate\Support\Facades\Route::post(
+            '/profiles/{variantId}',
+            [$controller, 'profile']
+        )
+            ->whereNumber('variantId')
+            ->middleware('throttle:10,1')
+            ->name('fiscal62.profile.approve');
+
+        \Illuminate\Support\Facades\Route::post(
+            '/documents/{documentId}/prepare',
+            [$controller, 'prepare']
+        )
+            ->whereNumber('documentId')
+            ->middleware('throttle:10,1')
+            ->name('fiscal62.ticket.prepare');
+
+        \Illuminate\Support\Facades\Route::post(
+            '/tickets/{ticketId}/send',
+            [$controller, 'send']
+        )
+            ->whereNumber('ticketId')
+            ->middleware('throttle:5,1')
+            ->name('fiscal62.ticket.send');
+
+        \Illuminate\Support\Facades\Route::post(
+            '/tickets/{ticketId}/poll',
+            [$controller, 'poll']
+        )
+            ->whereNumber('ticketId')
+            ->middleware('throttle:15,1')
+            ->name('fiscal62.ticket.poll');
+
+        \Illuminate\Support\Facades\Route::get(
+            '/tickets',
+            [$controller, 'index']
+        )
+            ->middleware('throttle:30,1')
+            ->name('fiscal62.ticket.index');
+
+        \Illuminate\Support\Facades\Route::get(
+            '/tickets/{ticketId}',
+            [$controller, 'show']
+        )
+            ->whereNumber('ticketId')
+            ->middleware('throttle:30,1')
+            ->name('fiscal62.ticket.show');
+
+        \Illuminate\Support\Facades\Route::get(
+            '/statistics',
+            [$controller, 'statistics']
+        )
+            ->middleware('throttle:30,1')
+            ->name('fiscal62.statistics');
+    });
