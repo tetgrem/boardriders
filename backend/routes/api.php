@@ -1205,3 +1205,28 @@ Route::middleware(['auth:sanctum'])
             ->middleware('throttle:30,1')
             ->name('crm67.inbox.index');
     });
+
+// BOARDRIDERS BLOCK 68 — OWNER-ONLY STAFF DIRECTORY
+Route::middleware(['auth:sanctum'])
+    ->prefix('v1/admin/crm68')
+    ->group(function (): void {
+        $controller = \App\Http\Controllers\Api\Crm68StaffController::class;
+
+        Route::get('/staff', [$controller, 'index'])
+            ->middleware('throttle:30,1')
+            ->name('crm68.staff.index');
+
+        Route::post('/staff', [$controller, 'grant'])
+            ->middleware('throttle:10,1')
+            ->name('crm68.staff.grant');
+
+        Route::post('/staff/{userId}/change', [$controller, 'change'])
+            ->whereNumber('userId')
+            ->middleware('throttle:10,1')
+            ->name('crm68.staff.change');
+
+        Route::get('/staff/{userId}/history', [$controller, 'history'])
+            ->whereNumber('userId')
+            ->middleware('throttle:30,1')
+            ->name('crm68.staff.history');
+    });

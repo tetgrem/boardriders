@@ -10,6 +10,20 @@ const allowedFilters = new Set([
 ]);
 
 function route(path: string[], method: "GET" | "POST"): string | null {
+  if (path[0] === "staff") {
+    if (path.length === 1 && (method === "GET" || method === "POST"))
+      return "crm68/staff";
+
+    if (path.length === 3 && /^[1-9]\d{0,15}$/.test(path[1])) {
+      if (method === "GET" && path[2] === "history")
+        return `crm68/staff/${path[1]}/history`;
+
+      if (method === "POST" && path[2] === "change")
+        return `crm68/staff/${path[1]}/change`;
+    }
+
+    return null;
+  }
   if (method === "GET" && path.length === 1 && path[0] === "inbox")
     return "crm67/inbox";
   if (method === "GET" && path.length === 1 && path[0] === "dashboard") return "dashboard";
@@ -68,7 +82,7 @@ async function proxy(request: Request, context: Context, method: "GET" | "POST")
     if (body.length > 1600) return NextResponse.json({ message: "Too large" }, { status: 413 });
   }
   const suffix = query.size ? `?${query}` : "";
-  const apiRoute = path.startsWith("crm66/") || path.startsWith("crm67/")
+  const apiRoute = path.startsWith("crm66/") || path.startsWith("crm67/") || path.startsWith("crm68/")
       ? path : `crm64/${path}`;
   try {
     const response = await fetch(`${laravel}/api/v1/admin/${apiRoute}${suffix}`, {

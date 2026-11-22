@@ -321,3 +321,226 @@
         min-width: 135px;
     }
 }
+
+/* ============================================================
+   BOARDRIDERS — BLOCK 68 / CRM STAFF MANAGEMENT
+   ============================================================ */
+
+.crm68-page {
+    display: grid;
+    gap: 20px;
+}
+
+.crm68-create-panel {
+    display: grid;
+    gap: 12px;
+}
+
+.crm68-create-panel h2 {
+    margin: 0;
+}
+
+.crm68-create-panel > p {
+    font-size: 12px;
+}
+
+.crm68-create {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) 180px auto;
+    gap: 13px;
+    align-items: end;
+}
+
+.crm68-create .crm65-primary {
+    min-height: 42px;
+}
+
+.crm68-success {
+    padding: 12px 15px;
+    background: #203c35;
+    border: 1px solid #3c7865;
+    border-radius: 9px;
+    color: #a4eed7;
+    font-size: 12px;
+}
+
+.crm68-list {
+    padding: 0;
+    overflow: hidden;
+}
+
+.crm68-list .crm65-panel-head {
+    padding: 20px 22px;
+    border-bottom: 1px solid #353b45;
+}
+
+.crm68-person {
+    padding: 21px 23px;
+    border-bottom: 1px solid #343945;
+}
+
+.crm68-person:last-child {
+    border-bottom: 0;
+}
+
+.crm68-person-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 14px;
+}
+
+.crm68-person-name {
+    min-width: 0;
+    display: grid;
+    gap: 5px;
+}
+
+.crm68-person-name strong {
+    font-size: 14px;
+    overflow-wrap: anywhere;
+}
+
+.crm68-person-name small {
+    font-size: 11px;
+    color: #979fad;
+    overflow-wrap: anywhere;
+}
+
+.crm68-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    justify-content: flex-end;
+}
+
+.crm68-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 9px;
+    margin-top: 16px;
+}
+
+.crm68-controls label {
+    min-width: 160px;
+}
+
+.crm68-controls button {
+    min-height: 42px;
+}
+
+.crm68-danger {
+    border: 1px solid #874549;
+    background: #4d292f;
+    color: #ffd3cf;
+    padding: 10px 15px;
+    border-radius: 9px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.crm68-danger:hover {
+    border-color: #ec8987;
+    background: #633339;
+}
+
+.crm68-footnote {
+    font-size: 11px;
+    margin: 8px 0 0;
+}
+
+.crm68-history {
+    margin-top: 17px;
+    padding: 14px 16px;
+    border: 1px solid #424753;
+    background: #171c24;
+    border-radius: 9px;
+    display: grid;
+    gap: 10px;
+}
+
+.crm68-history > p {
+    font-size: 12px;
+    color: #a9b1bc;
+}
+
+.crm68-history > div {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 9px;
+    justify-content: space-between;
+    font-size: 12px;
+}
+
+.crm68-history strong {
+    color: #eef1f6;
+}
+
+.crm68-history span {
+    color: #c5ccd7;
+}
+
+.crm68-history small {
+    color: #8f9aaa;
+}
+
+.crm68-more {
+    padding: 19px 23px;
+    display: flex;
+    justify-content: center;
+}
+
+/* Tablet */
+
+@media (max-width: 900px) {
+    .crm68-create {
+        grid-template-columns: minmax(0, 1fr) 180px;
+    }
+
+    .crm68-create .crm65-primary {
+        grid-column: 1 / -1;
+    }
+}
+
+/* Mobile */
+
+@media (max-width: 600px) {
+    .crm68-create {
+        grid-template-columns: 1fr;
+    }
+
+    .crm68-create .crm65-primary {
+        grid-column: auto;
+    }
+
+    .crm68-person {
+        padding: 17px;
+    }
+
+    .crm68-person-top {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .crm68-badges {
+        justify-content: flex-start;
+    }
+
+    .crm68-controls {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .crm68-controls label {
+        grid-column: 1 / -1;
+    }
+
+    .crm68-controls button {
+        white-space: normal;
+    }
+
+    .crm68-controls .crm65-ghost {
+        grid-column: 1 / -1;
+    }
+}

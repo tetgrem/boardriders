@@ -21,10 +21,11 @@ final class     Crm65Staff
         'cod.operations.ttn_lifecycle.view',
         'crm66.tasks.view',
         'crm66.tasks.manage',
+        'crm68.staff.manage',
     ];
 
     private const ROLES = [
-        'owner' => [0, 1, 2, 3, 4, 5, 6, 7, 8],
+        'owner' => [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
         'manager' => [0, 3, 4, 5, 6, 7, 8],
         'support' => [0, 3, 5, 6, 7, 8],
         'finance' => [0, 1, 3, 4, 5, 7],
