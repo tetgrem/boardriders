@@ -544,3 +544,329 @@
         grid-column: 1 / -1;
     }
 }
+
+
+/* BOARDRIDERS — BLOCK 69 / TASK SLA */
+
+.crm69-page {
+    display: grid;
+    gap: 20px;
+}
+
+.crm69-page h2 {
+    margin: 0 0 13px;
+    font-size: 18px;
+}
+
+.crm69-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.crm69-filters button {
+    padding: 11px 16px;
+    border: 1px solid #38404a;
+    border-radius: 9px;
+    background: #242a34;
+    color: #b9c4d1;
+    font-weight: 700;
+}
+
+.crm69-filters button.active {
+    border-color: #f68d50;
+    background: #47332c;
+    color: #fff;
+}
+
+.crm69-filters button:hover {
+    border-color: #ff9669;
+}
+
+.crm69-summary {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.crm69-metric {
+    padding: 18px;
+    background: #20252e;
+    border: 1px solid #363d47;
+    border-radius: 11px;
+    display: grid;
+    gap: 9px;
+}
+
+.crm69-metric small {
+    color: #a1abb9;
+    font-size: 12px;
+}
+
+.crm69-metric strong {
+    font-size: 32px;
+    line-height: 1;
+    color: #eef1f5;
+}
+
+.crm69-workload {
+    padding: 20px;
+}
+
+.crm69-workers {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 9px;
+}
+
+.crm69-workers > div {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 9px;
+    border: 1px solid #353c46;
+    border-radius: 8px;
+    padding: 11px 12px;
+    background: #1a1e26;
+}
+
+.crm69-workers span {
+    font-size: 12px;
+    color: #d2dae4;
+    overflow-wrap: anywhere;
+}
+
+.crm69-workers strong {
+    font-size: 20px;
+}
+
+.crm69-list {
+    display: grid;
+    gap: 14px;
+}
+
+.crm69-task {
+    padding: 19px;
+}
+
+.crm69-task.crm69-overdue {
+    border-color: #a25958;
+}
+
+.crm69-task-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: start;
+    gap: 16px;
+}
+
+.crm69-task-header strong {
+    overflow-wrap: anywhere;
+}
+
+.crm69-task-header p {
+    font-size: 12px;
+    margin-top: 8px;
+}
+
+.crm69-task-header a {
+    flex-shrink: 0;
+}
+
+.crm69-due {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 11px;
+    align-items: center;
+    padding: 13px 0;
+    font-size: 13px;
+}
+
+.crm69-warning {
+    border: 1px solid #a95858;
+    color: #ffb5af;
+    background: #48282c;
+    padding: 5px 9px;
+    border-radius: 7px;
+    font-size: 11px;
+}
+
+.crm69-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 9px;
+    align-items: end;
+    padding: 12px 0 16px;
+    border-top: 1px solid #343a45;
+}
+
+.crm69-controls label {
+    min-width: 185px;
+    flex: 1;
+}
+
+.crm69-controls input,
+.crm69-controls select {
+    min-width: 0;
+    width: 100%;
+}
+
+.crm69-controls button,
+.crm69-note-compose button {
+    min-height: 42px;
+    padding: 9px 14px;
+    color: #eef1f5;
+    border: 1px solid #515968;
+    background: #303743;
+    border-radius: 8px;
+    font-weight: 700;
+    font-size: 12px;
+}
+
+.crm69-controls button:disabled,
+.crm69-note-compose button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.crm69-controls button:not(:disabled):hover,
+.crm69-note-compose button:not(:disabled):hover {
+    border-color: #ff9669;
+}
+
+.crm69-note-compose {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 10px;
+    border-top: 1px solid #343a45;
+    padding: 14px 0;
+}
+
+.crm69-note-compose label {
+    min-width: 240px;
+    flex: 1;
+}
+
+.crm69-note-compose textarea {
+    width: 100%;
+    min-height: 68px;
+    resize: vertical;
+}
+
+.crm69-history {
+    margin-top: 15px;
+    padding: 14px;
+    border: 1px solid #414753;
+    border-radius: 9px;
+    background: #181d26;
+    display: grid;
+    gap: 10px;
+}
+
+.crm69-history h3 {
+    font-size: 13px;
+    margin: 9px 0 0;
+}
+
+.crm69-history h3:first-child {
+    margin-top: 0;
+}
+
+.crm69-history > div {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px solid #323a43;
+    font-size: 12px;
+}
+
+.crm69-history > div span {
+    overflow-wrap: anywhere;
+    flex: 1;
+}
+
+.crm69-history small,
+.crm69-history p {
+    color: #9fa8b6;
+    font-size: 11px;
+}
+
+.crm69-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+}
+
+.crm69-pagination button {
+    padding: 9px 15px;
+    border: 1px solid #414b57;
+    border-radius: 8px;
+    background: #292f39;
+    color: #e5e9f0;
+}
+
+.crm69-pagination button:disabled {
+    opacity: 0.45;
+}
+
+@media (max-width: 1120px) {
+    .crm69-workers {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 750px) {
+    .crm69-summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .crm69-task-header {
+        flex-direction: column;
+    }
+
+    .crm69-controls {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .crm69-controls label {
+        min-width: 0;
+        grid-column: 1 / -1;
+    }
+
+    .crm69-note-compose {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .crm69-workers {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 440px) {
+    .crm69-summary {
+        gap: 8px;
+    }
+
+    .crm69-metric {
+        padding: 13px;
+    }
+
+    .crm69-metric strong {
+        font-size: 26px;
+    }
+
+    .crm69-filters button {
+        padding: 9px 11px;
+        font-size: 12px;
+    }
+
+    .crm69-task {
+        padding: 14px;
+    }
+}

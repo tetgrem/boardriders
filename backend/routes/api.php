@@ -1230,3 +1230,33 @@ Route::middleware(['auth:sanctum'])
             ->middleware('throttle:30,1')
             ->name('crm68.staff.history');
     });
+
+
+// BOARDRIDERS BLOCK 69 — SLA & WORKLOAD
+Route::middleware(['auth:sanctum'])
+    ->prefix('v1/admin/crm69')
+    ->group(function (): void {
+        $controller = \App\Http\Controllers\Api\Crm69SlaController::class;
+
+        Route::get('/overview', [$controller, 'overview'])
+            ->middleware('throttle:30,1')->name('crm69.overview');
+
+        Route::get('/assignees', [$controller, 'assignees'])
+            ->middleware('throttle:30,1')->name('crm69.assignees');
+
+        Route::get('/tasks/{taskId}/history', [$controller, 'history'])
+            ->whereNumber('taskId')
+            ->middleware('throttle:30,1')->name('crm69.history');
+
+        Route::post('/tasks/{taskId}/deadline', [$controller, 'deadline'])
+            ->whereNumber('taskId')
+            ->middleware('throttle:12,1')->name('crm69.deadline');
+
+        Route::post('/tasks/{taskId}/comment', [$controller, 'comment'])
+            ->whereNumber('taskId')
+            ->middleware('throttle:20,1')->name('crm69.comment');
+
+        Route::post('/tasks/{taskId}/assign', [$controller, 'assign'])
+            ->whereNumber('taskId')
+            ->middleware('throttle:15,1')->name('crm69.assign');
+    });

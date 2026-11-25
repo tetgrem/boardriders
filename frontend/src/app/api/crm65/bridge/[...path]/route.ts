@@ -6,10 +6,27 @@ import { allowedOrigin, laravel, readSession } from "@/lib/crm65/session";
 type Context = { params: Promise<{ path: string[] }> };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const allowedFilters = new Set([
-  "limit", "before_id", "order_key", "payment_status", "has_rma", "has_fiscal_issue", "scope", "status", "priority"
+  "limit", "before_id", "order_key", "payment_status", "has_rma", "has_fiscal_issue", "scope", "status", "priority", "filter"
 ]);
 
 function route(path: string[], method: "GET" | "POST"): string | null {
+  if (path[0] === "sla") {
+    if (method === "GET" && path.length === 1)
+      return "crm69/overview";
+
+    if (method === "GET" && path.length === 2 && path[1] === "assignees")
+      return "crm69/assignees";
+
+    if (path.length === 4 && path[1] === "tasks" && /^[1-9]\d{0,15}$/.test(path[2])) {
+      if (method === "GET" && path[3] === "history")
+        return `crm69/tasks/${path[2]}/history`;
+
+      if (method === "POST" && ["deadline", "comment", "assign"].includes(path[3]))
+        return `crm69/tasks/${path[2]}/${path[3]}`;
+    }
+
+    return null;
+  }
   if (path[0] === "staff") {
     if (path.length === 1 && (method === "GET" || method === "POST"))
       return "crm68/staff";
@@ -82,7 +99,7 @@ async function proxy(request: Request, context: Context, method: "GET" | "POST")
     if (body.length > 1600) return NextResponse.json({ message: "Too large" }, { status: 413 });
   }
   const suffix = query.size ? `?${query}` : "";
-  const apiRoute = path.startsWith("crm66/") || path.startsWith("crm67/") || path.startsWith("crm68/")
+  const apiRoute = path.startsWith("crm66/") || path.startsWith("crm67/") || path.startsWith("crm68/") || path.startsWith("crm69/")
       ? path : `crm64/${path}`;
   try {
     const response = await fetch(`${laravel}/api/v1/admin/${apiRoute}${suffix}`, {

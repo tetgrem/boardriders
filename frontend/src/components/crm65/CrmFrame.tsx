@@ -53,6 +53,15 @@ export default function CrmFrame({ staff, children }: {
                 ♙ <span>Сотрудники</span>
               </Link>
           )}
+          {staff.abilities.includes("crm66.tasks.manage") && (
+              <Link
+                  href="/admin/sla"
+                  onClick={() => setMenu(false)}
+                  className={pathname.startsWith("/admin/sla") ? "active" : ""}
+              >
+                ◷ <span>SLA и сроки</span>
+              </Link>
+          )}
         </nav>
         <div className="crm65-sidebar-bottom">
           <p className="crm65-sidebar-hint">Финансовые и фискальные операции доступны только на чтение. Все действия учитываются сервером.</p>
