@@ -1260,3 +1260,31 @@ Route::middleware(['auth:sanctum'])
             ->whereNumber('taskId')
             ->middleware('throttle:15,1')->name('crm69.assign');
     });
+
+// BOARDRIDERS BLOCK 70 — CRM NOTIFICATIONS
+Route::middleware(['auth:sanctum'])
+    ->prefix('v1/admin/crm70')
+    ->group(function (): void {
+        $controller =
+            \App\Http\Controllers\Api\Crm70NotificationsController::class;
+
+        Route::get('/notifications', [$controller, 'index'])
+            ->middleware('throttle:60,1')
+            ->name('crm70.notifications.index');
+
+        Route::get('/count', [$controller, 'count'])
+            ->middleware('throttle:60,1')
+            ->name('crm70.notifications.count');
+
+        Route::post('/read', [$controller, 'read'])
+            ->middleware('throttle:60,1')
+            ->name('crm70.notifications.read');
+
+        Route::post('/unread', [$controller, 'unread'])
+            ->middleware('throttle:60,1')
+            ->name('crm70.notifications.unread');
+
+        Route::post('/preference', [$controller, 'preference'])
+            ->middleware('throttle:60,1')
+            ->name('crm70.notifications.preference');
+    });

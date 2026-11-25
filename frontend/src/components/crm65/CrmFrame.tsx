@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import type { StaffIdentity } from "@/lib/crm65/session";
+import NotificationBadge70 from "@/components/crm70/NotificationBadge70";
 
 export default function CrmFrame({ staff, children }: {
   staff: StaffIdentity; children: ReactNode;
@@ -60,6 +61,20 @@ export default function CrmFrame({ staff, children }: {
                   className={pathname.startsWith("/admin/sla") ? "active" : ""}
               >
                 ◷ <span>SLA и сроки</span>
+              </Link>
+          )}
+          {staff.abilities.includes("crm64.orders.view") && (
+              <Link
+                  href="/admin/notifications"
+                  onClick={() => setMenu(false)}
+                  className={
+                    pathname.startsWith("/admin/notifications")
+                        ? "active"
+                        : ""
+                  }
+              >
+                ♧ <span>Уведомления</span>
+                <NotificationBadge70 />
               </Link>
           )}
         </nav>
