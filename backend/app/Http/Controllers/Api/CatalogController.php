@@ -130,10 +130,9 @@ class CatalogController extends Controller
             )
 
             // Только публично разрешённые товары.
-            ->whereIn(
-                'product.status',
-                ['active', 'published']
-            )
+            ->where('product.status', 'active')
+            ->whereNull('product.deleted_at')
+            ->where('v.is_active', true)
 
             // Пока используем украинский прайс-лист.
             ->where('list.code', 'UA_RETAIL')

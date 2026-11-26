@@ -77,6 +77,19 @@ export default function CrmFrame({ staff, children }: {
                 <NotificationBadge70 />
               </Link>
           )}
+          {staff.abilities.includes("catalog71.manage") && (
+              <Link
+                  href="/admin/catalog"
+                  onClick={() => setMenu(false)}
+                  className={
+                    pathname.startsWith("/admin/catalog")
+                        ? "active"
+                        : ""
+                  }
+              >
+                ▦ <span>Каталог товаров</span>
+              </Link>
+          )}
         </nav>
         <div className="crm65-sidebar-bottom">
           <p className="crm65-sidebar-hint">Финансовые и фискальные операции доступны только на чтение. Все действия учитываются сервером.</p>

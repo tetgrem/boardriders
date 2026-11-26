@@ -6,10 +6,71 @@ import { allowedOrigin, laravel, readSession } from "@/lib/crm65/session";
 type Context = { params: Promise<{ path: string[] }> };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const allowedFilters = new Set([
-  "limit", "before_id", "order_key", "payment_status", "has_rma", "has_fiscal_issue", "scope", "status", "priority", "filter", "category", "unread", "page"
+  "limit", "before_id", "order_key", "payment_status", "has_rma", "has_fiscal_issue", "scope", "status", "priority", "filter", "category", "unread", "page", "q"
 ]);
 
 function route(path: string[], method: "GET" | "POST"): string | null {
+  if (path[0] === "catalog") {
+    if (
+        path.length === 2
+        && path[1] === "products"
+        && (method === "GET" || method === "POST")
+    ) {
+      return "catalog71/products";
+    }
+
+    if (
+        method === "GET"
+        && path.length === 2
+        && path[1] === "lookups"
+    ) {
+      return "catalog71/lookups";
+    }
+
+    if (
+        path[1] === "products"
+        && /^[1-9]\d{0,15}$/.test(path[2] ?? "")
+    ) {
+      if (method === "GET" && path.length === 3)
+        return `catalog71/products/${path[2]}`;
+
+      if (
+          method === "GET"
+          && path.length === 4
+          && path[3] === "history"
+      ) {
+        return `catalog71/products/${path[2]}/history`;
+      }
+
+      if (
+          method === "POST"
+          && path.length === 4
+          && path[3] === "change"
+      ) {
+        return `catalog71/products/${path[2]}/change`;
+      }
+    }
+
+    if (
+        path[1] === "directories"
+        && ["brand", "category"].includes(path[2] ?? "")
+    ) {
+      if (method === "POST" && path.length === 3) {
+        return `catalog71/directories/${path[2]}`;
+      }
+
+      if (
+          method === "GET"
+          && path.length === 5
+          && /^[1-9]\d{0,15}$/.test(path[3] ?? "")
+          && path[4] === "history"
+      ) {
+        return `catalog71/directories/${path[2]}/${path[3]}/history`;
+      }
+    }
+
+    return null;
+  }
   if (path[0] === "notifications") {
     if (method === "GET" && path.length === 1)
       return "crm70/notifications";
@@ -113,7 +174,20 @@ async function proxy(request: Request, context: Context, method: "GET" | "POST")
       return NextResponse.json({ message: "JSON required" }, { status: 415 });
     }
     body = await request.text();
-    if (body.length > 1600) return NextResponse.json({ message: "Too large" }, { status: 413 });
+    const maxBodyBytes =
+        path.startsWith("catalog71/products/")
+        && path.endsWith("/change")
+            ? 6_000_000
+            : path.startsWith("catalog71/directories/")
+                ? 100_000
+                : 1600;
+
+    if (new TextEncoder().encode(body).byteLength > maxBodyBytes) {
+      return NextResponse.json(
+          { message: "Too large" },
+          { status: 413 }
+      );
+    }
   }
   const suffix = query.size ? `?${query}` : "";
   const apiRoute =
@@ -122,6 +196,7 @@ async function proxy(request: Request, context: Context, method: "GET" | "POST")
       || path.startsWith("crm68/")
       || path.startsWith("crm69/")
       || path.startsWith("crm70/")
+      || path.startsWith("catalog71/")
           ? path
           : `crm64/${path}`;
   try {
@@ -139,8 +214,35 @@ async function proxy(request: Request, context: Context, method: "GET" | "POST")
     if (!response.ok) {
       const status = [400, 401, 403, 404, 409, 422, 429].includes(response.status)
         ? response.status : 502;
-      return NextResponse.json({ message: status === 401 ? "Сессия истекла" : "Операция CRM отклонена" },
-        { status, headers: { "Cache-Control": "no-store" } });
+
+      let message =
+          status === 401
+              ? "Сессия истекла"
+              : "Операция CRM отклонена";
+
+      if (path.startsWith("catalog71/") && status === 409) {
+        try {
+          const result = await response.json() as {
+            message?: unknown;
+          };
+
+          if (
+              typeof result.message === "string"
+              && result.message.length <= 250
+          ) {
+            message = result.message;
+          }
+        } catch {
+          // Keep the generic error message.
+        }
+      }
+
+      return NextResponse.json(
+          { message },
+          { status, headers: { "Cache-Control": "no-store" } }
+      );
+
+
     }
     const text = await response.text();
     if (text.length > 1_500_000) {

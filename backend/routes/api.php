@@ -1288,3 +1288,56 @@ Route::middleware(['auth:sanctum'])
             ->middleware('throttle:60,1')
             ->name('crm70.notifications.preference');
     });
+
+
+// ============================================================
+// BOARDRIDERS BLOCK 71 — CATALOG ADMINISTRATION
+// ============================================================
+
+Route::middleware(['auth:sanctum'])
+    ->prefix('v1/admin/catalog71')
+    ->group(function (): void {
+        $controller =
+            \App\Http\Controllers\Api\Catalog71Controller::class;
+
+        Route::get('/products', [$controller, 'index'])
+            ->middleware('throttle:60,1')
+            ->name('catalog71.products.index');
+
+        Route::post('/products', [$controller, 'create'])
+            ->middleware('throttle:20,1')
+            ->name('catalog71.products.create');
+
+        Route::get('/products/{productId}', [$controller, 'show'])
+            ->whereNumber('productId')
+            ->middleware('throttle:60,1')
+            ->name('catalog71.products.show');
+
+        Route::post('/products/{productId}/change', [$controller, 'change'])
+            ->whereNumber('productId')
+            ->middleware('throttle:30,1')
+            ->name('catalog71.products.change');
+
+        Route::get('/products/{productId}/history', [$controller, 'history'])
+            ->whereNumber('productId')
+            ->middleware('throttle:30,1')
+            ->name('catalog71.products.history');
+
+        Route::get('/lookups', [$controller, 'lookups'])
+            ->middleware('throttle:30,1')
+            ->name('catalog71.lookups');
+
+        Route::post('/directories/{kind}', [$controller, 'directory'])
+            ->whereIn('kind', ['brand', 'category'])
+            ->middleware('throttle:20,1')
+            ->name('catalog71.directories.save');
+
+        Route::get(
+            '/directories/{kind}/{entityId}/history',
+            [$controller, 'directoryHistory']
+        )
+            ->whereIn('kind', ['brand', 'category'])
+            ->whereNumber('entityId')
+            ->middleware('throttle:30,1')
+            ->name('catalog71.directories.history');
+    });

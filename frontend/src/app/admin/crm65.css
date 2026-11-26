@@ -1327,3 +1327,619 @@
         padding: 9px 11px;
     }
 }
+
+
+/* ============================================================
+   BOARDRIDERS — BLOCK 71 / CATALOG ADMINISTRATION
+   ============================================================ */
+
+.catalog71-page {
+    display: grid;
+    gap: 20px;
+}
+
+.catalog71-layout {
+    display: grid;
+    grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
+    align-items: start;
+    gap: 18px;
+}
+
+.catalog71-list-column,
+.catalog71-detail-column,
+.catalog71-editor {
+    min-width: 0;
+    display: grid;
+    align-content: start;
+    gap: 16px;
+}
+
+/* Panels */
+
+.catalog71-panel {
+    display: grid;
+    gap: 16px;
+    min-width: 0;
+    padding: 22px;
+}
+
+.catalog71-panel h2 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 750;
+    color: #edf0f5;
+}
+
+.catalog71-panel h3 {
+    margin: 10px 0 0;
+    font-size: 14px;
+    color: #e1e6ed;
+}
+
+.catalog71-panel p {
+    line-height: 1.6;
+}
+
+.catalog71-success {
+    padding: 13px 16px;
+    border: 1px solid #426c5e;
+    border-radius: 9px;
+    background: #233c34;
+    color: #a6e9c8;
+    font-size: 12px;
+}
+
+/* Navigation */
+
+.catalog71-tabs {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.catalog71-tabs button {
+    padding: 11px 17px;
+    border: 1px solid #3d4653;
+    border-radius: 9px;
+    background: #272d37;
+    color: #b7c1cd;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.catalog71-tabs button.active {
+    border-color: #ff9669;
+    background: #48332d;
+    color: #fff;
+}
+
+.catalog71-tabs button:hover {
+    border-color: #ff9669;
+}
+
+/* Forms */
+
+.catalog71-form {
+    display: grid;
+    gap: 13px;
+}
+
+.catalog71-form label {
+    min-width: 0;
+}
+
+.catalog71-form input,
+.catalog71-form select,
+.catalog71-form textarea {
+    min-width: 0;
+    width: 100%;
+}
+
+.catalog71-form textarea {
+    resize: vertical;
+    min-height: 80px;
+    line-height: 1.5;
+}
+
+.catalog71-form select[multiple] {
+    min-height: 145px;
+    padding: 7px;
+}
+
+.catalog71-form select[multiple] option {
+    padding: 7px;
+    border-radius: 5px;
+}
+
+.catalog71-form input[type="file"] {
+    padding: 10px;
+    border: 1px dashed #59616d;
+    background: #1a1e26;
+    border-radius: 9px;
+    cursor: pointer;
+}
+
+.catalog71-form input[type="file"]::file-selector-button {
+    padding: 8px 11px;
+    margin-right: 10px;
+    color: #e5eaf1;
+    background: #353d49;
+    border: 1px solid #4b5666;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.catalog71-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.catalog71-inline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 12px;
+}
+
+.catalog71-inline label {
+    flex: 1;
+    min-width: 180px;
+}
+
+.catalog71-inline button {
+    min-height: 42px;
+}
+
+.catalog71-check {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center;
+    gap: 9px;
+    font-size: 12px;
+}
+
+.catalog71-check input[type="checkbox"] {
+    appearance: auto;
+    width: 18px;
+    height: 18px;
+    min-height: 0;
+    flex: 0 0 18px;
+    accent-color: #f78851;
+    cursor: pointer;
+}
+
+.catalog71-page button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* Product list */
+
+.catalog71-product-list {
+    display: grid;
+    gap: 8px;
+}
+
+.catalog71-product-list > button {
+    display: grid;
+    gap: 7px;
+    padding: 13px 14px;
+    border: 1px solid #373f4b;
+    border-radius: 9px;
+    background: #212630;
+    text-align: left;
+}
+
+.catalog71-product-list > button:hover {
+    border-color: #a77257;
+}
+
+.catalog71-product-list > button.active {
+    border-color: #ff8d55;
+    background: #3c2e2b;
+}
+
+.catalog71-product-list strong {
+    font-size: 13px;
+    color: #e8edf4;
+    overflow-wrap: anywhere;
+    line-height: 1.5;
+}
+
+.catalog71-product-list small {
+    font-size: 11px;
+    color: #9ba5b3;
+    overflow-wrap: anywhere;
+}
+
+.catalog71-state {
+    justify-self: start;
+    padding: 4px 8px;
+    border: 1px solid #535e6d;
+    background: #303843;
+    color: #c0cad7;
+    border-radius: 6px;
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.catalog71-state.active {
+    background: #274139;
+    border-color: #487966;
+    color: #a5e7ca;
+}
+
+.catalog71-state.draft {
+    background: #453b2c;
+    border-color: #79613d;
+    color: #f0c98e;
+}
+
+.catalog71-state.archived {
+    background: #30343d;
+    border-color: #505761;
+    color: #a6afbd;
+}
+
+/* Attributes */
+
+.catalog71-values {
+    display: grid;
+    gap: 8px;
+}
+
+.catalog71-values > div {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    padding: 12px;
+    background: #1d222b;
+    border: 1px solid #39414d;
+    border-radius: 8px;
+}
+
+.catalog71-values span {
+    font-size: 12px;
+    color: #aeb8c5;
+}
+
+.catalog71-values strong {
+    flex: 1;
+    min-width: 70px;
+    font-size: 13px;
+    color: #e7ebf1;
+    overflow-wrap: anywhere;
+}
+
+.catalog71-values button {
+    border: 1px solid #74484c;
+    background: #402a30;
+    border-radius: 7px;
+    color: #f2b8b8;
+    padding: 7px 10px;
+    font-size: 11px;
+}
+
+/* SKU editor */
+
+.catalog71-variant {
+    padding: 17px;
+    background: #1c222b;
+    border: 1px solid #39424e;
+    border-radius: 10px;
+}
+
+.catalog71-variant > strong {
+    font-size: 15px;
+    color: #eef2f7;
+    overflow-wrap: anywhere;
+}
+
+.catalog71-variant > small {
+    font-size: 11px;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+}
+
+/* Product media */
+
+.catalog71-images {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.catalog71-image {
+    padding: 12px;
+    background: #1c222b;
+    border: 1px solid #39424e;
+    border-radius: 10px;
+    min-width: 0;
+}
+
+.catalog71-image > img {
+    width: 100%;
+    height: 180px;
+    object-fit: contain;
+    border-radius: 7px;
+    background: #eef0f2;
+}
+
+.catalog71-danger {
+    border: 1px solid #80494d;
+    background: #462d33;
+    color: #ffbfc0;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.catalog71-danger:hover {
+    background: #60373d;
+    border-color: #b76b6e;
+}
+
+/* Audit history */
+
+.catalog71-audit {
+    display: grid;
+    gap: 8px;
+}
+
+.catalog71-audit details {
+    min-width: 0;
+    background: #191e27;
+    border: 1px solid #3a414c;
+    border-radius: 8px;
+    padding: 13px;
+}
+
+.catalog71-audit summary {
+    cursor: pointer;
+    color: #e0e5ec;
+    font-size: 12px;
+}
+
+.catalog71-audit small {
+    display: block;
+    margin-top: 10px;
+    color: #8e98a9;
+    font-size: 11px;
+}
+
+.catalog71-audit pre {
+    max-height: 240px;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 11px;
+    line-height: 1.6;
+    color: #b5c1d0;
+    background: #12171e;
+    border-radius: 7px;
+    padding: 12px;
+    margin-top: 10px;
+}
+
+/* Pagination */
+
+.catalog71-pagination {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.catalog71-pagination button {
+    padding: 9px 12px;
+    border: 1px solid #414b59;
+    border-radius: 8px;
+    background: #2b323d;
+    color: #dce3ed;
+    font-size: 12px;
+}
+
+/* Tablet */
+
+@media (max-width: 1250px) {
+    .catalog71-layout {
+        grid-template-columns: minmax(230px, 270px) minmax(0, 1fr);
+    }
+
+    .catalog71-grid,
+    .catalog71-images {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 950px) {
+    .catalog71-layout {
+        grid-template-columns: 1fr;
+    }
+
+    .catalog71-product-list {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .catalog71-panel {
+        padding: 18px;
+    }
+}
+
+/* Mobile */
+
+@media (max-width: 600px) {
+    .catalog71-page {
+        gap: 15px;
+    }
+
+    .catalog71-panel {
+        padding: 15px;
+    }
+
+    .catalog71-grid,
+    .catalog71-images,
+    .catalog71-product-list {
+        grid-template-columns: 1fr;
+    }
+
+    .catalog71-inline {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .catalog71-inline label {
+        min-width: 0;
+    }
+
+    .catalog71-variant {
+        padding: 13px;
+    }
+
+    .catalog71-image > img {
+        height: 220px;
+    }
+
+    .catalog71-tabs button {
+        padding: 10px 12px;
+    }
+
+    .catalog71-values > div {
+        align-items: flex-start;
+    }
+}
+
+/* ============================================================
+   BOARDRIDERS — BLOCK 71.1 / UNIFIED PRODUCT EDITOR
+   ============================================================ */
+
+.catalog71-fieldset {
+    min-width: 0;
+    display: grid;
+    gap: 16px;
+    border: 0;
+    padding: 0;
+    margin: 0;
+}
+
+.catalog71-generated {
+    background: #171d25 !important;
+    color: #96a3b4 !important;
+    border-style: dashed !important;
+    font-family: monospace;
+    font-size: 12px;
+    cursor: default;
+}
+
+.catalog71-unified [hidden] {
+    display: none !important;
+}
+
+.catalog71-category-checks {
+    max-height: 240px;
+    overflow-y: auto;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    padding: 12px;
+    border: 1px solid #3b4450;
+    border-radius: 9px;
+    background: #1b2029;
+}
+
+.catalog71-category-checks label {
+    padding: 7px;
+    overflow-wrap: anywhere;
+}
+
+.catalog71-check input[type="radio"] {
+    appearance: auto;
+    width: 18px;
+    height: 18px;
+    min-height: 0;
+    flex: 0 0 18px;
+    accent-color: #f78851;
+}
+
+.catalog71-row-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.catalog71-pending {
+    border-color: #8c684c;
+    border-style: dashed;
+}
+
+.catalog71-savebar {
+    position: sticky;
+    bottom: 12px;
+    z-index: 15;
+
+    display: flex;
+    align-items: center;
+    gap: 14px;
+
+    padding: 17px 19px;
+
+    background: #252b35;
+    border: 1px solid #59616e;
+    border-radius: 12px;
+
+    box-shadow: 0 -5px 30px #00000045;
+}
+
+.catalog71-savebar > div {
+    flex: 1;
+    min-width: 0;
+    display: grid;
+    gap: 5px;
+}
+
+.catalog71-savebar strong {
+    font-size: 13px;
+    color: #f1f3f6;
+}
+
+.catalog71-savebar small {
+    font-size: 11px;
+    color: #a3aebb;
+}
+
+.catalog71-savebar .crm65-primary {
+    min-height: 45px;
+    padding: 12px 24px;
+    font-weight: 750;
+    white-space: nowrap;
+}
+
+.catalog71-savebar .crm65-secondary {
+    min-height: 45px;
+}
+
+@media (max-width: 700px) {
+    .catalog71-savebar {
+        flex-wrap: wrap;
+        bottom: 6px;
+        padding: 12px;
+        gap: 9px;
+    }
+
+    .catalog71-savebar > div {
+        flex-basis: 100%;
+    }
+
+    .catalog71-savebar > button {
+        flex: 1;
+        white-space: normal;
+    }
+
+    .catalog71-category-checks {
+        grid-template-columns: 1fr;
+    }
+}
