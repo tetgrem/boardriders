@@ -6,10 +6,45 @@ import { allowedOrigin, laravel, readSession } from "@/lib/crm65/session";
 type Context = { params: Promise<{ path: string[] }> };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const allowedFilters = new Set([
-  "limit", "before_id", "order_key", "payment_status", "has_rma", "has_fiscal_issue", "scope", "status", "priority", "filter", "category", "unread", "page", "q"
+  "limit", "before_id", "order_key", "payment_status", "has_rma", "has_fiscal_issue", "scope", "status", "priority", "filter", "category", "unread", "page", "q", "warehouse_id", "stock_status", "kind"
 ]);
 
 function route(path: string[], method: "GET" | "POST"): string | null {
+  if (path[0] === "warehouse") {
+    if (
+        method === "GET"
+        && path.length === 2
+        && [
+          "overview",
+          "stocks",
+          "variants",
+          "movements",
+          "reservations",
+          "documents"
+        ].includes(path[1])
+    ) {
+      return `warehouse72/${path[1]}`;
+    }
+
+    if (
+        method === "GET"
+        && path.length === 3
+        && path[1] === "documents"
+        && /^[1-9]\d{0,15}$/.test(path[2])
+    ) {
+      return `warehouse72/documents/${path[2]}`;
+    }
+
+    if (
+        method === "POST"
+        && path.length === 2
+        && path[1] === "submit"
+    ) {
+      return "warehouse72/submit";
+    }
+
+    return null;
+  }
   if (path[0] === "catalog") {
     if (
         path.length === 2
@@ -180,7 +215,9 @@ async function proxy(request: Request, context: Context, method: "GET" | "POST")
             ? 6_000_000
             : path.startsWith("catalog71/directories/")
                 ? 100_000
-                : 1600;
+                : path === "warehouse72/submit"
+                    ? 64_000
+                    : 1600;
 
     if (new TextEncoder().encode(body).byteLength > maxBodyBytes) {
       return NextResponse.json(
@@ -197,6 +234,7 @@ async function proxy(request: Request, context: Context, method: "GET" | "POST")
       || path.startsWith("crm69/")
       || path.startsWith("crm70/")
       || path.startsWith("catalog71/")
+      || path.startsWith("warehouse72/")
           ? path
           : `crm64/${path}`;
   try {
@@ -220,7 +258,13 @@ async function proxy(request: Request, context: Context, method: "GET" | "POST")
               ? "Сессия истекла"
               : "Операция CRM отклонена";
 
-      if (path.startsWith("catalog71/") && status === 409) {
+      if (
+          (
+              path.startsWith("catalog71/")
+              || path.startsWith("warehouse72/")
+          )
+          && status === 409
+      ) {
         try {
           const result = await response.json() as {
             message?: unknown;

@@ -1341,3 +1341,41 @@ Route::middleware(['auth:sanctum'])
             ->middleware('throttle:30,1')
             ->name('catalog71.directories.history');
     });
+
+// ============================================================
+// BOARDRIDERS BLOCK 72 — WAREHOUSE ADMINISTRATION
+// ============================================================
+
+Route::middleware(['auth:sanctum'])
+    ->prefix('v1/admin/warehouse72')
+    ->group(function (): void {
+        $controller =
+            \App\Http\Controllers\Api\Warehouse72Controller::class;
+
+        Route::get('/overview', [$controller, 'overview'])
+            ->middleware('throttle:60,1')
+            ->name('warehouse72.overview');
+
+        Route::post('/submit', [$controller, 'submit'])
+            ->middleware('throttle:20,1')
+            ->name('warehouse72.submit');
+
+        Route::get(
+            '/documents/{documentId}',
+            [$controller, 'document']
+        )
+            ->whereNumber('documentId')
+            ->middleware('throttle:30,1')
+            ->name('warehouse72.document');
+
+        Route::get('/{section}', [$controller, 'listing'])
+            ->whereIn('section', [
+                'stocks',
+                'variants',
+                'movements',
+                'reservations',
+                'documents',
+            ])
+            ->middleware('throttle:60,1')
+            ->name('warehouse72.listing');
+    });

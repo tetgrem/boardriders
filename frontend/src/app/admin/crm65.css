@@ -1943,3 +1943,537 @@
         grid-template-columns: 1fr;
     }
 }
+
+/* ============================================================
+   BOARDRIDERS — BLOCK 72 / WAREHOUSE ADMINISTRATION
+   ============================================================ */
+
+.warehouse72-page {
+    display: grid;
+    gap: 20px;
+}
+
+.warehouse72-editor {
+    display: grid;
+    gap: 16px;
+    min-width: 0;
+}
+
+.warehouse72-fieldset {
+    display: grid;
+    gap: 16px;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+
+.warehouse72-panel {
+    display: grid;
+    gap: 17px;
+    min-width: 0;
+    padding: 22px;
+}
+
+.warehouse72-panel h2 {
+    margin: 0;
+    color: #edf0f5;
+    font-size: 18px;
+    font-weight: 750;
+}
+
+.warehouse72-panel p {
+    margin: 0;
+    line-height: 1.6;
+}
+
+.warehouse72-success {
+    padding: 14px 17px;
+    border: 1px solid #426c5d;
+    border-radius: 9px;
+    background: #233e35;
+    color: #abe7c9;
+    font-size: 13px;
+}
+
+/* Summary metrics */
+
+.warehouse72-summary {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 13px;
+}
+
+.warehouse72-metric {
+    display: grid;
+    gap: 15px;
+    padding: 20px;
+    border: 1px solid #3b4450;
+    border-radius: 11px;
+    background: #232933;
+}
+
+.warehouse72-metric small {
+    color: #a6b0be;
+    font-size: 12px;
+}
+
+.warehouse72-metric strong {
+    color: #ecf0f5;
+    font-size: 32px;
+    font-weight: 750;
+    line-height: 1.1;
+    overflow-wrap: anywhere;
+}
+
+.warehouse72-metric.metric-1 {
+    border-color: #775d3e;
+}
+
+.warehouse72-metric.metric-1 strong {
+    color: #f3ba7d;
+}
+
+.warehouse72-metric.metric-2 {
+    border-color: #416a5c;
+}
+
+.warehouse72-metric.metric-2 strong {
+    color: #9de1bf;
+}
+
+/* Navigation */
+
+.warehouse72-tabs,
+.warehouse72-kind-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.warehouse72-tabs > button,
+.warehouse72-kind-buttons > button {
+    padding: 11px 16px;
+    border: 1px solid #414a57;
+    border-radius: 9px;
+    background: #272e38;
+    color: #bfc8d4;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.warehouse72-tabs > button.active,
+.warehouse72-kind-buttons > button.active {
+    border-color: #ff9669;
+    background: #49352d;
+    color: #fff;
+}
+
+.warehouse72-tabs > button:hover,
+.warehouse72-kind-buttons > button:hover {
+    border-color: #ff9669;
+}
+
+.warehouse72-page button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Form controls */
+
+.warehouse72-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    align-items: end;
+    gap: 13px;
+}
+
+.warehouse72-form {
+    display: grid;
+    gap: 15px;
+}
+
+.warehouse72-form label,
+.warehouse72-grid label {
+    min-width: 0;
+}
+
+.warehouse72-panel input,
+.warehouse72-panel textarea,
+.warehouse72-panel select {
+    min-width: 0;
+    width: 100%;
+}
+
+.warehouse72-panel textarea {
+    resize: vertical;
+}
+
+.warehouse72-filters {
+    padding-bottom: 16px;
+    border-bottom: 1px solid #39414d;
+}
+
+.warehouse72-filters > button {
+    min-height: 42px;
+}
+
+.warehouse72-search {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.warehouse72-search > input {
+    flex: 1;
+}
+
+/* Variant lookup */
+
+.warehouse72-lookup {
+    display: grid;
+    gap: 8px;
+}
+
+.warehouse72-lookup-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 15px;
+
+    padding: 14px;
+    border: 1px solid #3b4350;
+    border-radius: 9px;
+
+    background: #202630;
+}
+
+.warehouse72-lookup-row > div {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+}
+
+.warehouse72-lookup-row strong {
+    color: #e8edf4;
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}
+
+.warehouse72-lookup-row small {
+    color: #98a4b5;
+    font-size: 11px;
+    overflow-wrap: anywhere;
+}
+
+.warehouse72-lookup-row > button {
+    flex-shrink: 0;
+}
+
+/* Stock and document tables */
+
+.warehouse72-table-scroll {
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+.warehouse72-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.warehouse72-table th {
+    padding: 13px 12px;
+    background: #202630;
+    color: #aab5c3;
+    font-weight: 700;
+    text-align: left;
+    white-space: nowrap;
+    border-bottom: 1px solid #414b58;
+}
+
+.warehouse72-table td {
+    padding: 14px 12px;
+    color: #dce2eb;
+    border-bottom: 1px solid #363e49;
+    vertical-align: middle;
+}
+
+.warehouse72-table tbody tr:hover {
+    background: #292f39;
+}
+
+.warehouse72-table td strong {
+    display: block;
+    font-size: 13px;
+    color: #edf0f5;
+    min-width: 135px;
+}
+
+.warehouse72-table td small {
+    display: block;
+    margin-top: 6px;
+    font-size: 11px;
+    color: #9ca7b8;
+    overflow-wrap: anywhere;
+    max-width: 240px;
+}
+
+.warehouse72-table td a {
+    color: #ffab80;
+    text-decoration: none;
+    font-weight: 700;
+}
+
+.warehouse72-table td a:hover {
+    text-decoration: underline;
+}
+
+.warehouse72-table .warehouse72-reserved {
+    color: #ffc183;
+    font-weight: 750;
+}
+
+.warehouse72-positive,
+.warehouse72-table .warehouse72-positive {
+    color: #9de1bc;
+    font-weight: 750;
+}
+
+.warehouse72-negative,
+.warehouse72-table .warehouse72-negative {
+    color: #f39898;
+    font-weight: 750;
+}
+
+.warehouse72-table input.warehouse72-quantity {
+    width: 95px;
+    min-width: 75px;
+}
+
+.warehouse72-danger {
+    padding: 8px 11px;
+    border: 1px solid #815055;
+    border-radius: 7px;
+    background: #442d34;
+    color: #ffc0c0;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.warehouse72-danger:hover {
+    background: #61383d;
+}
+
+/* Warehouses directory */
+
+.warehouse72-directory {
+    display: grid;
+    grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+    align-items: start;
+    gap: 17px;
+}
+
+.warehouse72-directory-item {
+    display: grid;
+    gap: 7px;
+    padding: 14px;
+    text-align: left;
+    border: 1px solid #3c4551;
+    border-radius: 9px;
+    background: #212731;
+}
+
+.warehouse72-directory-item strong {
+    font-size: 13px;
+    color: #e9edf5;
+}
+
+.warehouse72-directory-item small {
+    font-size: 11px;
+    color: #a1adbc;
+    overflow-wrap: anywhere;
+}
+
+.warehouse72-directory-item.active {
+    border-color: #ff9669;
+    background: #44332e;
+}
+
+.warehouse72-readonly {
+    display: grid;
+    gap: 12px;
+}
+
+/* Document history */
+
+.warehouse72-row-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+}
+
+.warehouse72-json {
+    max-height: 420px;
+    overflow: auto;
+    margin-top: 12px;
+    padding: 15px;
+    border: 1px solid #343d49;
+    border-radius: 9px;
+    background: #151a22;
+    color: #b6c4d5;
+    font-size: 11px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.warehouse72-panel summary {
+    cursor: pointer;
+    font-size: 13px;
+    color: #dce2eb;
+}
+
+.warehouse72-actions,
+.warehouse72-pagination {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+}
+
+.warehouse72-pagination {
+    justify-content: center;
+    margin-top: 6px;
+}
+
+.warehouse72-pagination button {
+    padding: 9px 15px;
+    border: 1px solid #45505e;
+    border-radius: 8px;
+    background: #2b323d;
+    color: #dce4ee;
+    font-size: 12px;
+}
+
+/* Sticky posting bar */
+
+.warehouse72-savebar {
+    position: sticky;
+    bottom: 12px;
+    z-index: 15;
+
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 15px;
+
+    padding: 17px 20px;
+
+    border: 1px solid #596471;
+    border-radius: 12px;
+    background: #272e38;
+    box-shadow: 0 -5px 28px #00000045;
+}
+
+.warehouse72-savebar > div {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+}
+
+.warehouse72-savebar strong {
+    color: #f0f2f6;
+    font-size: 14px;
+}
+
+.warehouse72-savebar small {
+    color: #a4afbe;
+    font-size: 11px;
+}
+
+.warehouse72-savebar > button {
+    min-height: 45px;
+    padding: 12px 23px;
+    white-space: nowrap;
+}
+
+/* Tablet */
+
+@media (max-width: 1150px) {
+    .warehouse72-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .warehouse72-summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 800px) {
+    .warehouse72-directory {
+        grid-template-columns: 1fr;
+    }
+
+    .warehouse72-panel {
+        padding: 17px;
+    }
+}
+
+/* Mobile */
+
+@media (max-width: 600px) {
+    .warehouse72-page {
+        gap: 15px;
+    }
+
+    .warehouse72-panel {
+        padding: 14px;
+        gap: 13px;
+    }
+
+    .warehouse72-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .warehouse72-metric {
+        padding: 14px;
+        gap: 10px;
+    }
+
+    .warehouse72-metric strong {
+        font-size: 25px;
+    }
+
+    .warehouse72-tabs > button,
+    .warehouse72-kind-buttons > button {
+        padding: 10px 12px;
+    }
+
+    .warehouse72-lookup-row {
+        padding: 12px;
+        gap: 9px;
+    }
+
+    .warehouse72-savebar {
+        flex-wrap: wrap;
+        bottom: 6px;
+        padding: 13px;
+    }
+
+    .warehouse72-savebar > div {
+        flex-basis: 100%;
+    }
+
+    .warehouse72-savebar > button {
+        width: 100%;
+    }
+
+    .warehouse72-table th,
+    .warehouse72-table td {
+        padding: 11px 10px;
+    }
+}
