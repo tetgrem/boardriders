@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { CrmError, crm, money, statusLabel, type OrderPage } from "@/lib/crm65/client";
 import type { StaffIdentity } from "@/lib/crm65/session";
 import { useRouter } from "next/navigation";
+import LiveSearch from "@/components/crm65/LiveSearch";
 
 type Filters = { key: string; status: string; rma: string; fiscal: string };
 
@@ -94,7 +95,34 @@ export default function OrdersClient({ staff }: { staff: StaffIdentity }) {
       setRevision((x) => x + 1);
     }} className="crm65-secondary">↻ Обновить</button></div>
     <form onSubmit={submit} className="crm65-filterbar" aria-label="Фильтры заказов">
-      <label className="crm65-search-label"><span>Найти по номеру</span><input value={draft.key} onChange={e => setDraft(v => ({ ...v, key: e.target.value }))} placeholder="UUID или начало UUID" maxLength={36} /></label>
+      <label className="crm65-search-label">
+        <span>Найти по номеру</span>
+
+        <LiveSearch
+            value={draft.key}
+            applied={filters.key}
+            maxLength={36}
+            placeholder="UUID или начало UUID"
+            onChange={(value) => {
+              setDraft((old) => ({
+                ...old,
+                key: value.replace(/[^0-9a-fA-F-]/g, ""),
+              }));
+            }}
+            onSearch={(value) => {
+              markLoading();
+
+              setFilters((old) => ({
+                ...old,
+                key: value,
+              }));
+
+              setCursor(null);
+              setStack([]);
+              setRevision((old) => old + 1);
+            }}
+        />
+      </label>
       <label><span>Оплата</span><select value={draft.status} onChange={e => setDraft(v => ({ ...v, status: e.target.value }))}><option value="">Все</option><option value="paid">Оплачено</option><option value="pending">Ожидание</option><option value="review">Проверка</option></select></label>
       <label><span>Возвраты</span><select value={draft.rma} onChange={e => setDraft(v => ({ ...v, rma: e.target.value }))}><option value="">Все</option><option value="true">Есть RMA</option><option value="false">Нет RMA</option></select></label>
       {canFiscal && <label><span>Фискальные проблемы</span><select value={draft.fiscal} onChange={e => setDraft(v => ({ ...v, fiscal: e.target.value }))}><option value="">Все</option><option value="true">Есть проблемы</option><option value="false">Нет проблем</option></select></label>}

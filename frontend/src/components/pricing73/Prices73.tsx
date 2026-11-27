@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import { crm } from "@/lib/crm65/client";
+import LiveSearch from "@/components/crm65/LiveSearch";
 
 import {
     fromMinor,
@@ -238,11 +239,16 @@ export default function Prices73({
 
                     <label>
                         Поиск
-                        <input
+                        <LiveSearch
                             value={query}
-                            maxLength={64}
+                            applied={search}
+                            onChange={setQuery}
+                            disabled={locked}
                             placeholder="Название, SKU, штрихкод"
-                            onChange={(event) => setQuery(event.target.value)}
+                            onSearch={(value) => {
+                                setSearch(value);
+                                setCursor(null);
+                            }}
                         />
                     </label>
 
@@ -257,10 +263,6 @@ export default function Prices73({
                         />
                         Только без цены
                     </label>
-
-                    <button className="crm65-secondary" disabled={loading || locked}>
-                        Найти
-                    </button>
                 </form>
 
                 {loading && <p>Загрузка...</p>}

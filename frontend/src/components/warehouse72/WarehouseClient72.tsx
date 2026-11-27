@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { crm, CrmError, when } from "@/lib/crm65/client";
-
+import LiveSearch from "@/components/crm65/LiveSearch";
 import DocumentEditor72 from "./DocumentEditor72";
 import WarehouseDirectory72 from "./WarehouseDirectory72";
 
@@ -530,24 +530,22 @@ export default function WarehouseClient72({
 
                         <label>
                             Поиск
-                            <input
+                            <LiveSearch
                                 value={query}
-                                maxLength={64}
+                                applied={search}
+                                onChange={setQuery}
                                 placeholder={
                                     tab === "documents"
                                         ? "Номер документа"
                                         : "Название, SKU, штрихкод"
                                 }
-                                onChange={(event) => setQuery(event.target.value)}
+                                onSearch={(value) => {
+                                    setSearch(value);
+                                    resetPagination();
+                                    setReload((old) => old + 1);
+                                }}
                             />
                         </label>
-
-                        <button
-                            className="crm65-secondary"
-                            disabled={loading}
-                        >
-                            Найти
-                        </button>
                     </form>
 
                     {loading && (

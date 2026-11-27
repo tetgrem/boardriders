@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import { crm, when } from "@/lib/crm65/client";
+import LiveSearch from "@/components/crm65/LiveSearch";
 
 import {
     formText,
@@ -31,6 +32,10 @@ type EditableRule = Rule & {
     localId: number;
 };
 
+// ============================================================
+// RULE EDITOR
+// ============================================================
+
 function RuleEditor({
                         rule,
                         locked,
@@ -43,174 +48,313 @@ function RuleEditor({
     remove: () => void;
 }) {
     const [query, setQuery] = useState("");
-    const [options, setOptions] = useState<ScopeOption[]>([]);
-    const [cursor, setCursor] = useState<number | null>(null);
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState<string | null>(null);
 
-    async function search(next: number | null = null) {
-        if (rule.scope_type === "all" || loading) return;
+    const [appliedSearch, setAppliedSearch] =
+        useState<string | null>(null);
+
+    const [requestCursor, setRequestCursor] =
+        useState<number | null>(null);
+
+    const [options, setOptions] = useState<ScopeOption[]>([]);
+
+    const [cursor, setCursor] =
+        useState<number | null>(null);
+
+    const [loading, setLoading] = useState(false);
+
+    const [error, setError] =
+        useState<string | null>(null);
+
+    // ========================================================
+    // LIVE SEARCH
+    // ========================================================
+
+    useEffect(() => {
+        if (
+            rule.scope_type === "all"
+            || appliedSearch === null
+        ) {
+            return;
+        }
+
+        let live = true;
 
         setLoading(true);
         setError(null);
+        setOptions([]);
+        setCursor(null);
 
-        try {
-            const params = new URLSearchParams({
-                scope_type: rule.scope_type,
-                q: query.trim(),
-                limit: "30",
+        const params = new URLSearchParams({
+            scope_type: rule.scope_type,
+            limit: "30",
+        });
+
+        if (appliedSearch !== "") {
+            params.set("q", appliedSearch);
+        }
+
+        if (requestCursor !== null) {
+            params.set(
+                "before_id",
+                String(requestCursor)
+            );
+        }
+
+        crm<Page<ScopeOption>>(
+            `pricing/scopes?${params}`
+        )
+            .then((result) => {
+                if (!live) return;
+
+                setOptions(result.items);
+                setCursor(result.next_before_id);
+            })
+            .catch((caught) => {
+                if (live) {
+                    setError(
+                        caught instanceof Error
+                            ? caught.message
+                            : "Ошибка поиска"
+                    );
+                }
+            })
+            .finally(() => {
+                if (live) {
+                    setLoading(false);
+                }
             });
 
-            if (next !== null) {
-                params.set("before_id", String(next));
-            }
+        return () => {
+            live = false;
+        };
+    }, [
+        rule.scope_type,
+        appliedSearch,
+        requestCursor,
+    ]);
 
-            const result = await crm<Page<ScopeOption>>(
-                `pricing/scopes?${params}`
-            );
+    function clearSearch() {
+        setQuery("");
+        setAppliedSearch(null);
+        setRequestCursor(null);
+        setOptions([]);
+        setCursor(null);
+        setLoading(false);
+        setError(null);
+    }
 
-            setOptions(result.items);
-            setCursor(result.next_before_id);
-        } catch (caught) {
-            setError(
-                caught instanceof Error
-                    ? caught.message : "Ошибка поиска"
-            );
-        } finally {
-            setLoading(false);
+    function applySearch(value: string) {
+        if (value === "") {
+            clearSearch();
+            return;
         }
+
+        setRequestCursor(null);
+        setAppliedSearch(value);
+    }
+
+    function showAll() {
+        setQuery("");
+        setRequestCursor(null);
+        setAppliedSearch("");
+        setError(null);
     }
 
     return (
         <div className="pricing73-rule">
+
             <div className="pricing73-grid">
+
                 <label>
                     Область действия
+
                     <select
                         value={rule.scope_type}
-                        disabled={locked || loading}
+                        disabled={locked}
                         onChange={(event) => {
-                            setOptions([]);
-                            setCursor(null);
-                            setQuery("");
+                            clearSearch();
 
                             change({
                                 ...rule,
-                                scope_type: event.target.value as ScopeType,
+                                scope_type:
+                                    event.target.value as ScopeType,
                                 scope_id: null,
                             });
                         }}
                     >
-                        {Object.entries(scopeLabels).map(([key, label]) => (
-                            <option key={key} value={key}>{label}</option>
-                        ))}
+                        {Object.entries(scopeLabels).map(
+                            ([key, label]) => (
+                                <option
+                                    key={key}
+                                    value={key}
+                                >
+                                    {label}
+                                </option>
+                            )
+                        )}
                     </select>
                 </label>
 
                 <label>
                     Действие
+
                     <select
                         value={rule.decision}
                         disabled={locked}
-                        onChange={(event) => change({
-                            ...rule,
-                            decision: event.target.value as Rule["decision"],
-                        })}
+                        onChange={(event) => {
+                            change({
+                                ...rule,
+                                decision:
+                                    event.target.value as Rule["decision"],
+                            });
+                        }}
                     >
-                        <option value="allow">Разрешить списание</option>
-                        <option value="deny">Запретить списание</option>
+                        <option value="allow">
+                            Разрешить списание
+                        </option>
+
+                        <option value="deny">
+                            Запретить списание
+                        </option>
                     </select>
                 </label>
 
                 <label>
                     Приоритет
+
                     <input
                         type="number"
                         min={-1000000}
                         max={1000000}
                         required
-                        value={Number.isNaN(rule.priority) ? "" : rule.priority}
+                        value={
+                            Number.isNaN(rule.priority)
+                                ? ""
+                                : rule.priority
+                        }
                         disabled={locked}
-                        onChange={(event) => change({
-                            ...rule,
-                            priority: event.target.value === ""
-                                ? NaN : Number(event.target.value),
-                        })}
+                        onChange={(event) => {
+                            change({
+                                ...rule,
+                                priority:
+                                    event.target.value === ""
+                                        ? NaN
+                                        : Number(event.target.value),
+                            });
+                        }}
                     />
                 </label>
+
             </div>
 
             {rule.scope_type !== "all" && (
                 <>
                     <div className="pricing73-actions">
-                        <input
+
+                        <LiveSearch
                             value={query}
-                            maxLength={64}
+                            applied={appliedSearch ?? ""}
+                            onChange={setQuery}
                             disabled={locked}
-                            placeholder={`Найти: ${scopeLabels[rule.scope_type]}`}
-                            onChange={(event) => setQuery(event.target.value)}
-                            onKeyDown={(event) => {
-                                if (event.key === "Enter") {
-                                    event.preventDefault();
-                                    void search();
-                                }
-                            }}
+                            placeholder={
+                                `Найти: ${scopeLabels[rule.scope_type]}`
+                            }
+                            onSearch={applySearch}
                         />
 
                         <button
                             type="button"
                             className="crm65-secondary"
                             disabled={locked || loading}
-                            onClick={() => void search()}
+                            onClick={showAll}
                         >
-                            Найти
+                            Показать все
                         </button>
 
                         {cursor !== null && (
                             <button
                                 type="button"
+                                className="crm65-secondary"
                                 disabled={locked || loading}
-                                onClick={() => void search(cursor)}
+                                onClick={() => {
+                                    setRequestCursor(cursor);
+                                }}
                             >
                                 Далее
                             </button>
                         )}
+
                     </div>
+
+                    {loading && (
+                        <small className="crm65-muted">
+                            Поиск...
+                        </small>
+                    )}
+
+                    {!loading
+                        && appliedSearch !== null
+                        && options.length === 0
+                        && !error
+                        && (
+                            <small className="crm65-muted">
+                                Ничего не найдено.
+                            </small>
+                        )}
 
                     <label>
                         Объект правила
+
                         <select
                             required
                             value={rule.scope_id ?? ""}
                             disabled={locked}
-                            onChange={(event) => change({
-                                ...rule,
-                                scope_id: event.target.value
-                                    ? Number(event.target.value) : null,
-                            })}
+                            onChange={(event) => {
+                                change({
+                                    ...rule,
+                                    scope_id:
+                                        event.target.value
+                                            ? Number(event.target.value)
+                                            : null,
+                                });
+                            }}
                         >
-                            <option value="">Выбрать</option>
+                            <option value="">
+                                Выбрать
+                            </option>
 
                             {rule.scope_id !== null
                                 && !options.some(
-                                    (item) => item.id === rule.scope_id
-                                ) && (
+                                    (item) =>
+                                        item.id === rule.scope_id
+                                )
+                                && (
                                     <option value={rule.scope_id}>
                                         Выбранный объект #{rule.scope_id}
                                     </option>
                                 )}
 
                             {options.map((item) => (
-                                <option key={item.id} value={item.id}>
-                                    {item.name ?? "Без названия"} · #{item.id}
+                                <option
+                                    key={item.id}
+                                    value={item.id}
+                                >
+                                    {item.name ?? "Без названия"}
+                                    {" · #"}
+                                    {item.id}
                                 </option>
                             ))}
                         </select>
                     </label>
+
                 </>
             )}
 
-            {error && <p className="crm65-error">{error}</p>}
+            {error && (
+                <p className="crm65-error" role="alert">
+                    {error}
+                </p>
+            )}
 
             <button
                 type="button"
@@ -220,9 +364,14 @@ function RuleEditor({
             >
                 Убрать правило
             </button>
+
         </div>
     );
 }
+
+// ============================================================
+// LOYALTY POLICY EDITOR
+// ============================================================
 
 function PolicyEditor({
                           market,
@@ -242,88 +391,146 @@ function PolicyEditor({
     const latest = data.latest;
     const digits = market.minor_units;
 
-    const [error, setError] = useState<string | null>(null);
+    const [error, setError] =
+        useState<string | null>(null);
 
-    const [rules, setRules] = useState<EditableRule[]>(
-        data.rules.map((rule, index) => ({
-            localId: index + 1,
-            scope_type: rule.scope_type,
-            scope_id: rule.brand_id
-                ?? rule.category_id
-                ?? rule.product_id
-                ?? rule.variant_id
-                ?? null,
-            decision: rule.decision,
-            priority: rule.priority,
-        }))
-    );
+    const [rules, setRules] =
+        useState<EditableRule[]>(
+            data.rules.map((rule, index) => ({
+                localId: index + 1,
 
-    const [nextId, setNextId] = useState(data.rules.length + 1);
+                scope_type: rule.scope_type,
 
-    const pending = latest !== null
+                scope_id:
+                    rule.brand_id
+                    ?? rule.category_id
+                    ?? rule.product_id
+                    ?? rule.variant_id
+                    ?? null,
+
+                decision: rule.decision,
+                priority: rule.priority,
+            }))
+        );
+
+    const [nextId, setNextId] =
+        useState(data.rules.length + 1);
+
+    const pending =
+        latest !== null
         && Date.parse(latest.effective_from) > Date.now();
+
+    // ========================================================
+    // SAVE POLICY
+    // ========================================================
 
     function save(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
         setError(null);
 
-        if (locked || !canManage || pending) return;
+        if (
+            locked
+            || !canManage
+            || pending
+        ) {
+            return;
+        }
 
         const form = new FormData(event.currentTarget);
 
         try {
             const enabled = form.has("enabled");
 
-            if (rules.some((rule) =>
-                !Number.isInteger(rule.priority)
-                || rule.priority < -1000000
-                || rule.priority > 1000000
-                || (rule.scope_type !== "all" && rule.scope_id === null)
-            )) {
-                throw new Error("Заполните все параметры правил.");
+            if (
+                rules.some((rule) =>
+                        !Number.isInteger(rule.priority)
+                        || rule.priority < -1000000
+                        || rule.priority > 1000000
+                        || (
+                            rule.scope_type !== "all"
+                            && rule.scope_id === null
+                        )
+                )
+            ) {
+                throw new Error(
+                    "Заполните все параметры правил."
+                );
             }
 
-            if (enabled && !rules.some((rule) => rule.decision === "allow")) {
+            if (
+                enabled
+                && !rules.some(
+                    (rule) => rule.decision === "allow"
+                )
+            ) {
                 throw new Error(
                     "Добавьте хотя бы одно разрешающее правило."
                 );
             }
 
-            const share = toMinor(formText(form, "share"), 2);
+            const share = toMinor(
+                formText(form, "share"),
+                2
+            );
 
             if (share > 10000) {
-                throw new Error("Доля оплаты бонусами не может превышать 100%.");
+                throw new Error(
+                    "Доля оплаты бонусами не может превышать 100%."
+                );
             }
 
-            const money = toMinor(formText(form, "money_step"), digits);
+            const money = toMinor(
+                formText(form, "money_step"),
+                digits
+            );
 
             if (money < 1) {
-                throw new Error("Стоимость бонусного шага должна быть положительной.");
+                throw new Error(
+                    "Стоимость бонусного шага должна быть положительной."
+                );
             }
 
             if (!window.confirm(
                 "Создать новую версию правил лояльности? Она вступит в силу через две минуты."
-            )) return;
+            )) {
+                return;
+            }
 
             submit({
                 action: "policy_create",
-                market_id: market.id,
-                expected_policy_id: latest?.id ?? null,
 
-                program_code: formText(form, "program"),
+                market_id: market.id,
+
+                expected_policy_id:
+                    latest?.id ?? null,
+
+                program_code:
+                    formText(form, "program"),
+
                 is_enabled: enabled,
 
                 bonus_units_per_step:
-                    integer(formText(form, "bonus_step"), 1),
+                    integer(
+                        formText(form, "bonus_step"),
+                        1
+                    ),
 
                 money_minor_per_step: money,
+
                 max_goods_share_bps: share,
 
                 max_discount_minor:
-                    optionalMinor(form, "maximum", digits),
+                    optionalMinor(
+                        form,
+                        "maximum",
+                        digits
+                    ),
 
                 minimum_cash_minor:
-                    toMinor(formText(form, "minimum_cash"), digits),
+                    toMinor(
+                        formText(form, "minimum_cash"),
+                        digits
+                    ),
 
                 rules: rules.map((rule) => ({
                     scope_type: rule.scope_type,
@@ -336,15 +543,20 @@ function PolicyEditor({
         } catch (caught) {
             setError(
                 caught instanceof Error
-                    ? caught.message : "Ошибка правил лояльности"
+                    ? caught.message
+                    : "Ошибка правил лояльности"
             );
         }
     }
 
     return (
         <div className="pricing73-stack">
+
             <section className="crm65-panel pricing73-panel">
-                <h2>Версии политики · {market.code}</h2>
+
+                <h2>
+                    Версии политики · {market.code}
+                </h2>
 
                 {data.items.length === 0 && (
                     <p className="crm65-muted">
@@ -353,14 +565,29 @@ function PolicyEditor({
                 )}
 
                 {data.items.map((policy) => (
-                    <div className="pricing73-rule" key={policy.id}>
-                        <strong>{policy.rule_version}</strong>
+                    <div
+                        className="pricing73-rule"
+                        key={policy.id}
+                    >
+                        <strong>
+                            {policy.rule_version}
+                        </strong>
 
                         <small>
                             {policy.is_enabled
-                                ? "Списание разрешено" : "Списание отключено"}
-                            {" · "}{fromMinor(policy.max_goods_share_bps, 2)}%
-                            {" · "}{when(policy.effective_from)}
+                                ? "Списание разрешено"
+                                : "Списание отключено"}
+
+                            {" · "}
+
+                            {fromMinor(
+                                policy.max_goods_share_bps,
+                                2
+                            )}%
+
+                            {" · "}
+
+                            {when(policy.effective_from)}
                         </small>
 
                         <small>
@@ -372,12 +599,13 @@ function PolicyEditor({
                         </small>
                     </div>
                 ))}
+
             </section>
 
             {pending && (
                 <p className="pricing73-info">
-                    Уже запланирована новая политика. После её активации
-                    нажмите «Обновить».
+                    Уже запланирована новая политика.
+                    После её активации нажмите «Обновить».
                 </p>
             )}
 
@@ -391,104 +619,142 @@ function PolicyEditor({
                         className="pricing73-fieldset"
                         disabled={locked || pending}
                     >
+
                         <section className="crm65-panel pricing73-panel">
-                            <h2>Новая версия программы</h2>
+
+                            <h2>
+                                Новая версия программы
+                            </h2>
 
                             <label className="pricing73-check">
                                 <input
                                     type="checkbox"
                                     name="enabled"
-                                    defaultChecked={latest?.is_enabled ?? false}
+                                    defaultChecked={
+                                        latest?.is_enabled ?? false
+                                    }
                                 />
+
                                 Разрешить списание бонусов
                             </label>
 
                             <div className="pricing73-grid">
+
                                 <label>
                                     Код программы
+
                                     <input
                                         name="program"
                                         required
                                         maxLength={64}
                                         defaultValue={
-                                            latest?.program_code ?? "BOARDRIDERS"
+                                            latest?.program_code
+                                            ?? "BOARDRIDERS"
                                         }
                                     />
                                 </label>
 
                                 <label>
                                     Бонусов в одном шаге
+
                                     <input
                                         name="bonus_step"
                                         type="number"
                                         min={1}
                                         required
-                                        defaultValue={latest?.bonus_units_per_step ?? 1}
+                                        defaultValue={
+                                            latest?.bonus_units_per_step
+                                            ?? 1
+                                        }
                                     />
                                 </label>
 
                                 <label>
                                     Стоимость шага, {market.currency_code}
+
                                     <input
                                         name="money_step"
                                         inputMode="decimal"
                                         required
-                                        defaultValue={latest
-                                            ? fromMinor(latest.money_minor_per_step, digits)
-                                            : "1"}
+                                        defaultValue={
+                                            latest
+                                                ? fromMinor(
+                                                    latest.money_minor_per_step,
+                                                    digits
+                                                )
+                                                : "1"
+                                        }
                                     />
                                 </label>
 
                                 <label>
                                     Максимальная оплата бонусами, %
+
                                     <input
                                         name="share"
                                         required
                                         inputMode="decimal"
-                                        defaultValue={latest
-                                            ? fromMinor(latest.max_goods_share_bps, 2)
-                                            : "30"}
+                                        defaultValue={
+                                            latest
+                                                ? fromMinor(
+                                                    latest.max_goods_share_bps,
+                                                    2
+                                                )
+                                                : "30"
+                                        }
                                     />
                                 </label>
 
                                 <label>
                                     Максимальная скидка бонусами
+
                                     <input
                                         name="maximum"
                                         inputMode="decimal"
-                                        defaultValue={fromMinor(
-                                            latest?.max_discount_minor,
-                                            digits
-                                        )}
+                                        defaultValue={
+                                            fromMinor(
+                                                latest?.max_discount_minor,
+                                                digits
+                                            )
+                                        }
                                     />
                                 </label>
 
                                 <label>
                                     Минимальная денежная оплата
+
                                     <input
                                         name="minimum_cash"
                                         required
                                         inputMode="decimal"
-                                        defaultValue={fromMinor(
-                                            latest?.minimum_cash_minor ?? 0,
-                                            digits
-                                        )}
+                                        defaultValue={
+                                            fromMinor(
+                                                latest?.minimum_cash_minor ?? 0,
+                                                digits
+                                            )
+                                        }
                                     />
                                 </label>
+
                             </div>
 
                             <p className="crm65-muted">
-                                Лимит применяется к стоимости товаров после
-                                скидок, без стоимости доставки.
+                                Лимит применяется к стоимости товаров
+                                после скидок, без стоимости доставки.
                             </p>
+
                         </section>
 
                         <section className="crm65-panel pricing73-panel">
-                            <h2>Правила списания</h2>
+
+                            <h2>
+                                Правила списания
+                            </h2>
 
                             <p className="crm65-muted">
-                                Больший приоритет выигрывает. При одинаковом
-                                приоритете запрет сильнее разрешения.
+                                Больший приоритет выигрывает.
+                                При одинаковом приоритете запрет
+                                сильнее разрешения.
                                 Если ни одно разрешение не подходит,
                                 бонусы списывать нельзя.
                             </p>
@@ -499,16 +765,24 @@ function PolicyEditor({
                                     rule={rule}
                                     locked={locked || pending}
                                     change={(updated) => {
-                                        setRules((old) => old.map((item) =>
-                                            item.localId === updated.localId
-                                                ? updated : item
-                                        ));
+                                        setRules((old) =>
+                                            old.map((item) =>
+                                                item.localId === updated.localId
+                                                    ? updated
+                                                    : item
+                                            )
+                                        );
+
                                         onDirty(true);
                                     }}
                                     remove={() => {
-                                        setRules((old) => old.filter(
-                                            (item) => item.localId !== rule.localId
-                                        ));
+                                        setRules((old) =>
+                                            old.filter(
+                                                (item) =>
+                                                    item.localId !== rule.localId
+                                            )
+                                        );
+
                                         onDirty(true);
                                     }}
                                 />
@@ -529,13 +803,19 @@ function PolicyEditor({
                                             priority: 0,
                                         },
                                     ]);
-                                    setNextId((value) => value + 1);
+
+                                    setNextId(
+                                        (value) => value + 1
+                                    );
+
                                     onDirty(true);
                                 }}
                             >
                                 + Добавить правило
                             </button>
+
                         </section>
+
                     </fieldset>
 
                     <button
@@ -544,13 +824,23 @@ function PolicyEditor({
                     >
                         Сохранить новую версию правил
                     </button>
+
                 </form>
             )}
 
-            {error && <p className="crm65-error" role="alert">{error}</p>}
+            {error && (
+                <p className="crm65-error" role="alert">
+                    {error}
+                </p>
+            )}
+
         </div>
     );
 }
+
+// ============================================================
+// LOYALTY MAIN COMPONENT
+// ============================================================
 
 export default function Loyalty73({
                                       markets,
@@ -567,20 +857,36 @@ export default function Loyalty73({
     submit: SubmitCommand;
     onDirty: (value: boolean) => void;
 }) {
-    const [marketId, setMarketId] = useState(markets[0]?.id ?? 0);
+    const [marketId, setMarketId] =
+        useState(markets[0]?.id ?? 0);
 
-    const [data, setData] = useState<Policies | null>(null);
-    const [error, setError] = useState<string | null>(null);
-    const [marketForm, setMarketForm] = useState(false);
+    const [data, setData] =
+        useState<Policies | null>(null);
 
-    const [dirty, setDirty] = useState(false);
+    const [error, setError] =
+        useState<string | null>(null);
 
-    const market = markets.find((item) => item.id === marketId);
+    const [marketForm, setMarketForm] =
+        useState(false);
+
+    const [dirty, setDirty] =
+        useState(false);
+
+    const [loading, setLoading] =
+        useState(false);
+
+    const market = markets.find(
+        (item) => item.id === marketId
+    );
 
     function markDirty(value: boolean) {
         setDirty(value);
         onDirty(value);
     }
+
+    // ========================================================
+    // LOAD MARKET POLICY
+    // ========================================================
 
     useEffect(() => {
         if (!marketId) return;
@@ -588,16 +894,30 @@ export default function Loyalty73({
         let live = true;
 
         setData(null);
+        setError(null);
+        setLoading(true);
 
-        crm<Policies>(`pricing/policies/${marketId}`)
+        crm<Policies>(
+            `pricing/policies/${marketId}`
+        )
             .then((response) => {
-                if (live) setData(response);
+                if (live) {
+                    setData(response);
+                }
             })
             .catch((caught) => {
-                if (live) setError(
-                    caught instanceof Error
-                        ? caught.message : "Ошибка загрузки политики"
-                );
+                if (live) {
+                    setError(
+                        caught instanceof Error
+                            ? caught.message
+                            : "Ошибка загрузки политики"
+                    );
+                }
+            })
+            .finally(() => {
+                if (live) {
+                    setLoading(false);
+                }
             });
 
         return () => {
@@ -607,43 +927,93 @@ export default function Loyalty73({
 
     return (
         <div className="pricing73-stack">
+
             <section className="crm65-panel pricing73-panel">
+
                 <div className="pricing73-row-head">
-                    <h2>Рынки программы лояльности</h2>
+
+                    <h2>
+                        Рынки программы лояльности
+                    </h2>
 
                     {canManage && (
                         <button
                             type="button"
                             className="crm65-secondary"
-                            disabled={locked || dirty}
-                            onClick={() => setMarketForm((value) => !value)}
+                            disabled={
+                                locked
+                                || (dirty && !marketForm)
+                            }
+                            onClick={() => {
+                                if (marketForm) {
+                                    if (
+                                        dirty
+                                        && !window.confirm(
+                                            "Отменить создание рынка?"
+                                        )
+                                    ) {
+                                        return;
+                                    }
+
+                                    setMarketForm(false);
+                                    markDirty(false);
+                                    return;
+                                }
+
+                                setMarketForm(true);
+                            }}
                         >
-                            + Новый рынок
+                            {marketForm
+                                ? "Отменить создание"
+                                : "+ Новый рынок"}
                         </button>
                     )}
+
                 </div>
 
                 <label>
                     Рынок
+
                     <select
                         value={marketId}
                         disabled={locked || marketForm}
                         onChange={(event) => {
-                            if (dirty && !window.confirm(
-                                "Отменить несохранённые правила?"
-                            )) return;
+                            const next =
+                                Number(event.target.value);
+
+                            if (next === marketId) {
+                                return;
+                            }
+
+                            if (
+                                dirty
+                                && !window.confirm(
+                                    "Отменить несохранённые правила?"
+                                )
+                            ) {
+                                return;
+                            }
 
                             markDirty(false);
-                            setMarketId(Number(event.target.value));
+                            setData(null);
+                            setError(null);
+                            setMarketId(next);
                         }}
                     >
                         {markets.length === 0 && (
-                            <option value={0}>Нет рынков</option>
+                            <option value={0}>
+                                Нет рынков
+                            </option>
                         )}
 
                         {markets.map((item) => (
-                            <option key={item.id} value={item.id}>
-                                {item.name} · {item.currency_code}
+                            <option
+                                key={item.id}
+                                value={item.id}
+                            >
+                                {item.name}
+                                {" · "}
+                                {item.currency_code}
                             </option>
                         ))}
                     </select>
@@ -656,20 +1026,37 @@ export default function Loyalty73({
                         onSubmit={(event) => {
                             event.preventDefault();
 
-                            const form = new FormData(event.currentTarget);
+                            if (locked) return;
+
+                            const form =
+                                new FormData(event.currentTarget);
 
                             submit({
                                 action: "market_create",
-                                price_list_id: Number(
-                                    formText(form, "price_list")
-                                ),
-                                name: formText(form, "name"),
-                                code: formText(form, "code").toUpperCase(),
+
+                                price_list_id:
+                                    Number(
+                                        formText(
+                                            form,
+                                            "price_list"
+                                        )
+                                    ),
+
+                                name:
+                                    formText(form, "name"),
+
+                                code:
+                                    formText(
+                                        form,
+                                        "code"
+                                    ).toUpperCase(),
                             });
                         }}
                     >
+
                         <label>
                             Название
+
                             <input
                                 name="name"
                                 required
@@ -680,6 +1067,7 @@ export default function Loyalty73({
 
                         <label>
                             Код рынка
+
                             <input
                                 name="code"
                                 required
@@ -691,21 +1079,46 @@ export default function Loyalty73({
 
                         <label>
                             Прайс-лист для валюты рынка
-                            <select name="price_list" required disabled={locked}>
+
+                            <select
+                                name="price_list"
+                                required
+                                disabled={locked}
+                            >
+                                {lists.length === 0 && (
+                                    <option value="">
+                                        Нет прайс-листов
+                                    </option>
+                                )}
+
                                 {lists.map((item) => (
-                                    <option key={item.id} value={item.id}>
+                                    <option
+                                        key={item.id}
+                                        value={item.id}
+                                    >
                                         {item.name}
                                     </option>
                                 ))}
                             </select>
                         </label>
 
-                        <button className="crm65-primary" disabled={locked}>
+                        <button
+                            className="crm65-primary"
+                            disabled={locked || lists.length === 0}
+                        >
                             Создать рынок
                         </button>
+
                     </form>
                 )}
+
             </section>
+
+            {!marketForm && loading && (
+                <p className="crm65-muted">
+                    Загружаем политику лояльности...
+                </p>
+            )}
 
             {!marketForm && market && data && (
                 <PolicyEditor
@@ -719,7 +1132,12 @@ export default function Loyalty73({
                 />
             )}
 
-            {error && <p className="crm65-error">{error}</p>}
+            {error && (
+                <p className="crm65-error" role="alert">
+                    {error}
+                </p>
+            )}
+
         </div>
     );
-}   
+}

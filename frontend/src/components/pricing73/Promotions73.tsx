@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import { crm, when } from "@/lib/crm65/client";
+import LiveSearch from "@/components/crm65/LiveSearch";
 
 import {
     formText,
@@ -219,16 +220,17 @@ export default function Promotions73({
                         setCursor(null);
                     }}
                 >
-                    <input
+                    <LiveSearch
                         value={query}
-                        maxLength={64}
+                        applied={search}
+                        onChange={setQuery}
+                        disabled={locked}
                         placeholder="Название акции или промокод"
-                        onChange={(event) => setQuery(event.target.value)}
+                        onSearch={(value) => {
+                            setSearch(value);
+                            setCursor(null);
+                        }}
                     />
-
-                    <button className="crm65-secondary" disabled={loading}>
-                        Найти
-                    </button>
                 </form>
 
                 {loading && <p>Загрузка...</p>}

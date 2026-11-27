@@ -6,10 +6,67 @@ import { allowedOrigin, laravel, readSession } from "@/lib/crm65/session";
 type Context = { params: Promise<{ path: string[] }> };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const allowedFilters = new Set([
-  "limit", "before_id", "order_key", "payment_status", "has_rma", "has_fiscal_issue", "scope", "status", "priority", "filter", "category", "unread", "page", "q", "warehouse_id", "stock_status", "kind", "price_list_id", "price_status", "scope_type"
+  "limit", "before_id", "order_key", "payment_status", "has_rma", "has_fiscal_issue", "scope", "status", "priority", "filter", "category", "unread", "page", "q", "warehouse_id", "stock_status", "kind", "price_list_id", "price_status", "scope_type", "segment"
 ]);
 
 function route(path: string[], method: "GET" | "POST"): string | null {
+  if (path[0] === "customers") {
+    if (method === "GET" && path.length === 1) {
+      return "crm74/customers";
+    }
+
+    if (
+        method === "GET"
+        && path.length === 2
+        && path[1] === "overview"
+    ) {
+      return "crm74/overview";
+    }
+
+    if (!/^[1-9]\d{0,15}$/.test(path[1] ?? "")) {
+      return null;
+    }
+
+    const customer = `crm74/customers/${path[1]}`;
+
+    if (method === "GET" && path.length === 2) {
+      return customer;
+    }
+
+    if (
+        method === "GET"
+        && path.length === 3
+        && [
+          "orders",
+          "returns",
+          "wallets",
+          "history",
+          "access"
+        ].includes(path[2])
+    ) {
+      return `${customer}/${path[2]}`;
+    }
+
+    if (
+        method === "GET"
+        && path.length === 5
+        && path[2] === "wallets"
+        && /^[1-9]\d{0,15}$/.test(path[3])
+        && path[4] === "ledger"
+    ) {
+      return `${customer}/wallets/${path[3]}/ledger`;
+    }
+
+    if (
+        method === "POST"
+        && path.length === 3
+        && path[2] === "write"
+    ) {
+      return `${customer}/write`;
+    }
+
+    return null;
+  }
   if (path[0] === "pricing" && path[1] === "campaigns") {
     if (method === "GET" && path.length === 2) {
       return "pricing73/campaigns";
@@ -279,7 +336,10 @@ async function proxy(request: Request, context: Context, method: "GET" | "POST")
                     || path.startsWith("pricing73/campaigns/")
                 )
                     ? 64_000
-                    : 1600;
+                    : path.startsWith("crm74/customers/")
+                    && path.endsWith("/write")
+                        ? 8_000
+                        : 1600;
 
     if (new TextEncoder().encode(body).byteLength > maxBodyBytes) {
       return NextResponse.json(
@@ -298,6 +358,7 @@ async function proxy(request: Request, context: Context, method: "GET" | "POST")
       || path.startsWith("catalog71/")
       || path.startsWith("warehouse72/")
       || path.startsWith("pricing73/")
+      || path.startsWith("crm74/")
           ? path
           : `crm64/${path}`;
   try {
@@ -326,6 +387,7 @@ async function proxy(request: Request, context: Context, method: "GET" | "POST")
               path.startsWith("catalog71/")
               || path.startsWith("warehouse72/")
               || path.startsWith("pricing73/")
+              || path.startsWith("crm74/")
           )
           && status === 409
       ) {

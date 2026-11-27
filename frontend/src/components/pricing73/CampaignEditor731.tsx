@@ -42,6 +42,7 @@ type Preview = {
     currency_code: string;
     minor_units: number;
     preview_token: string;
+
     sample: Array<{
         id: number;
         sku: string;
@@ -53,6 +54,18 @@ type Preview = {
     }>;
 };
 
+type Props = {
+    lists: PriceList[];
+    locked: boolean;
+    submit: SubmitCommand;
+    onDirty: (value: boolean) => void;
+    onClose: () => void;
+};
+
+// ============================================================
+// LOCAL DATE
+// ============================================================
+
 function localDate(date: Date): string {
     const shifted = new Date(
         date.getTime() - date.getTimezoneOffset() * 60000
@@ -61,46 +74,68 @@ function localDate(date: Date): string {
     return shifted.toISOString().slice(0, 16);
 }
 
+// ============================================================
+// AUTOMATIC CAMPAIGN EDITOR
+// ============================================================
+
 export default function CampaignEditor731({
                                               lists,
                                               locked,
                                               submit,
                                               onDirty,
                                               onClose,
-                                          }: {
-    lists: PriceList[];
-    locked: boolean;
-    submit: SubmitCommand;
-    onDirty: (value: boolean) => void;
-    onClose: () => void;
-}) {
-    const [listId, setListId] = useState(lists[0]?.id ?? 0);
+                                          }: Props) {
+    const [listId, setListId] =
+        useState(lists[0]?.id ?? 0);
 
-    const [scope, setScope] = useState<ScopeType>("all");
-    const [selected, setSelected] = useState<ScopeOption[]>([]);
-    const [excluded, setExcluded] = useState<ScopeOption[]>([]);
+    const [scope, setScope] =
+        useState<ScopeType>("all");
 
-    const [type, setType] = useState<"percent" | "fixed">("percent");
+    const [selected, setSelected] =
+        useState<ScopeOption[]>([]);
 
-    const [stockFilter, setStockFilter] = useState(false);
-    const [oldFilter, setOldFilter] = useState(false);
+    const [excluded, setExcluded] =
+        useState<ScopeOption[]>([]);
+
+    const [type, setType] =
+        useState<"percent" | "fixed">("percent");
+
+    const [stockFilter, setStockFilter] =
+        useState(false);
+
+    const [oldFilter, setOldFilter] =
+        useState(false);
 
     const [preview, setPreview] = useState<{
         terms: Terms;
         result: Preview;
     } | null>(null);
 
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState<string | null>(null);
+    const [loading, setLoading] =
+        useState(false);
 
-    const [initialStart] = useState(() => localDate(new Date()));
+    const [error, setError] =
+        useState<string | null>(null);
 
-    const [initialEnd] = useState(() => localDate(
-        new Date(Date.now() + 7 * 86400000)
-    ));
+    const [initialStart] = useState(
+        () => localDate(new Date())
+    );
 
-    const list = lists.find((item) => item.id === listId);
+    const [initialEnd] = useState(() =>
+        localDate(
+            new Date(Date.now() + 7 * 86400000)
+        )
+    );
+
+    const list = lists.find(
+        (item) => item.id === listId
+    );
+
     const disabled = locked || loading;
+
+    // ========================================================
+    // INVALIDATE PREVIEW
+    // ========================================================
 
     function invalidate() {
         setPreview(null);
@@ -108,20 +143,38 @@ export default function CampaignEditor731({
         onDirty(true);
     }
 
-    async function calculate(event: FormEvent<HTMLFormElement>) {
+    // ========================================================
+    // CALCULATE CAMPAIGN PREVIEW
+    // ========================================================
+
+    async function calculate(
+        event: FormEvent<HTMLFormElement>
+    ) {
         event.preventDefault();
         setError(null);
 
-        if (disabled || !list) return;
+        if (disabled || !list) {
+            return;
+        }
 
-        const form = new FormData(event.currentTarget);
+        const form = new FormData(
+            event.currentTarget
+        );
 
         try {
-            const starts = utcDate(formText(form, "starts"));
-            const ends = utcDate(formText(form, "ends"));
+            const starts = utcDate(
+                formText(form, "starts")
+            );
 
-            if (!starts || !ends
-                || Date.parse(ends) <= Date.parse(starts)) {
+            const ends = utcDate(
+                formText(form, "ends")
+            );
+
+            if (
+                !starts
+                || !ends
+                || Date.parse(ends) <= Date.parse(starts)
+            ) {
                 throw new Error(
                     "Укажите корректные даты акции."
                 );
@@ -129,28 +182,46 @@ export default function CampaignEditor731({
 
             const value = toMinor(
                 formText(form, "value"),
-                type === "percent" ? 2 : list.minor_units
+                type === "percent"
+                    ? 2
+                    : list.minor_units
             );
 
-            if (value <= 0
-                || (type === "percent" && value > 10000)) {
-                throw new Error("Недопустимый размер скидки.");
+            if (
+                value <= 0
+                || (type === "percent" && value > 10000)
+            ) {
+                throw new Error(
+                    "Недопустимый размер скидки."
+                );
             }
 
-            if (scope !== "all" && !selected.length) {
-                throw new Error("Выберите объекты акции.");
+            if (
+                scope !== "all"
+                && !selected.length
+            ) {
+                throw new Error(
+                    "Выберите объекты акции."
+                );
             }
 
-            const priority = Number(formText(form, "priority"));
+            const priority = Number(
+                formText(form, "priority")
+            );
 
-            if (!Number.isInteger(priority)
+            if (
+                !Number.isInteger(priority)
                 || priority < -1000000
-                || priority > 1000000) {
-                throw new Error("Некорректный приоритет.");
+                || priority > 1000000
+            ) {
+                throw new Error(
+                    "Некорректный приоритет."
+                );
             }
 
             const terms: Terms = {
                 price_list_id: listId,
+
                 name: formText(form, "name"),
                 badge: formText(form, "badge"),
 
@@ -164,25 +235,42 @@ export default function CampaignEditor731({
                 ),
 
                 priority,
-                allow_promo: form.has("allow_promo"),
-                allow_loyalty: form.has("allow_loyalty"),
+
+                allow_promo:
+                    form.has("allow_promo"),
+
+                allow_loyalty:
+                    form.has("allow_loyalty"),
 
                 scope_type: scope,
 
-                scope_ids: scope === "all"
-                    ? [] : selected.map((item) => item.id),
+                scope_ids:
+                    scope === "all"
+                        ? []
+                        : selected.map(
+                            (item) => item.id
+                        ),
 
-                excluded_variant_ids: excluded.map(
-                    (item) => item.id
-                ),
+                excluded_variant_ids:
+                    excluded.map(
+                        (item) => item.id
+                    ),
 
-                max_stock: stockFilter
-                    ? optionalInteger(form, "max_stock")
-                    : null,
+                max_stock:
+                    stockFilter
+                        ? optionalInteger(
+                            form,
+                            "max_stock"
+                        )
+                        : null,
 
-                unsold_days: oldFilter
-                    ? optionalInteger(form, "unsold_days")
-                    : null,
+                unsold_days:
+                    oldFilter
+                        ? optionalInteger(
+                            form,
+                            "unsold_days"
+                        )
+                        : null,
 
                 starts_at: starts,
                 ends_at: ends,
@@ -199,17 +287,25 @@ export default function CampaignEditor731({
                 }
             );
 
-            setPreview({ terms, result });
+            setPreview({
+                terms,
+                result,
+            });
 
         } catch (caught) {
             setError(
                 caught instanceof Error
-                    ? caught.message : "Ошибка расчёта акции"
+                    ? caught.message
+                    : "Ошибка расчёта акции"
             );
         } finally {
             setLoading(false);
         }
     }
+
+    // ========================================================
+    // INTERFACE
+    // ========================================================
 
     return (
         <form
@@ -221,12 +317,20 @@ export default function CampaignEditor731({
                 className="pricing73-fieldset"
                 disabled={disabled}
             >
+
+                {/* GENERAL CAMPAIGN SETTINGS */}
+
                 <section className="crm65-panel pricing73-panel">
-                    <h2>Новая автоматическая акция</h2>
+
+                    <h2>
+                        Новая автоматическая акция
+                    </h2>
 
                     <div className="pricing73-grid">
+
                         <label>
                             Название акции
+
                             <input
                                 name="name"
                                 required
@@ -237,6 +341,7 @@ export default function CampaignEditor731({
 
                         <label>
                             Метка на витрине
+
                             <input
                                 name="badge"
                                 required
@@ -248,15 +353,23 @@ export default function CampaignEditor731({
 
                         <label>
                             Прайс-лист
+
                             <select
                                 value={listId}
                                 onChange={(event) =>
-                                    setListId(Number(event.target.value))
+                                    setListId(
+                                        Number(event.target.value)
+                                    )
                                 }
                             >
                                 {lists.map((item) => (
-                                    <option key={item.id} value={item.id}>
-                                        {item.name} · {item.currency_code}
+                                    <option
+                                        key={item.id}
+                                        value={item.id}
+                                    >
+                                        {item.name}
+                                        {" · "}
+                                        {item.currency_code}
                                     </option>
                                 ))}
                             </select>
@@ -264,14 +377,22 @@ export default function CampaignEditor731({
 
                         <label>
                             Вид скидки
+
                             <select
                                 value={type}
                                 onChange={(event) =>
-                                    setType(event.target.value as typeof type)
+                                    setType(
+                                        event.target.value as typeof type
+                                    )
                                 }
                             >
-                                <option value="percent">Процент</option>
-                                <option value="fixed">Фиксированная сумма</option>
+                                <option value="percent">
+                                    Процент
+                                </option>
+
+                                <option value="fixed">
+                                    Фиксированная сумма
+                                </option>
                             </select>
                         </label>
 
@@ -279,6 +400,7 @@ export default function CampaignEditor731({
                             {type === "percent"
                                 ? "Скидка, %"
                                 : `Скидка, ${list?.currency_code ?? ""}`}
+
                             <input
                                 name="value"
                                 inputMode="decimal"
@@ -289,6 +411,7 @@ export default function CampaignEditor731({
 
                         <label>
                             Максимальная скидка на единицу
+
                             <input
                                 name="max_discount"
                                 inputMode="decimal"
@@ -298,6 +421,7 @@ export default function CampaignEditor731({
 
                         <label>
                             Начало акции
+
                             <input
                                 type="datetime-local"
                                 name="starts"
@@ -308,6 +432,7 @@ export default function CampaignEditor731({
 
                         <label>
                             Окончание акции
+
                             <input
                                 type="datetime-local"
                                 name="ends"
@@ -318,6 +443,7 @@ export default function CampaignEditor731({
 
                         <label>
                             Приоритет
+
                             <input
                                 name="priority"
                                 type="number"
@@ -327,6 +453,7 @@ export default function CampaignEditor731({
                                 required
                             />
                         </label>
+
                     </div>
 
                     <p className="crm65-muted">
@@ -334,26 +461,50 @@ export default function CampaignEditor731({
                         По умолчанию акция рассчитана на неделю.
                         Акции не суммируются друг с другом.
                     </p>
+
                 </section>
 
+                {/* CAMPAIGN TARGETS */}
+
                 <section className="crm65-panel pricing73-panel">
-                    <h2>Товары, участвующие в акции</h2>
+
+                    <h2>
+                        Товары, участвующие в акции
+                    </h2>
 
                     <label>
                         Область действия
+
                         <select
                             value={scope}
                             onChange={(event) => {
-                                setScope(event.target.value as ScopeType);
+                                setScope(
+                                    event.target.value as ScopeType
+                                );
+
                                 setSelected([]);
                                 invalidate();
                             }}
                         >
-                            <option value="all">Весь каталог</option>
-                            <option value="brand">Выбранные бренды</option>
-                            <option value="category">Выбранные категории</option>
-                            <option value="product">Выбранные товары</option>
-                            <option value="variant">Отдельные SKU</option>
+                            <option value="all">
+                                Весь каталог
+                            </option>
+
+                            <option value="brand">
+                                Выбранные бренды
+                            </option>
+
+                            <option value="category">
+                                Выбранные категории
+                            </option>
+
+                            <option value="product">
+                                Выбранные товары
+                            </option>
+
+                            <option value="variant">
+                                Отдельные SKU
+                            </option>
                         </select>
                     </label>
 
@@ -363,27 +514,35 @@ export default function CampaignEditor731({
                             scope={scope}
                             selected={selected}
                             disabled={disabled}
-                            onChange={(items) => {
+                            onChange={(items: ScopeOption[]) => {
                                 setSelected(items);
                                 invalidate();
                             }}
                         />
                     )}
 
+                    {/* LOW STOCK FILTER */}
+
                     <label className="pricing73-check">
+
                         <input
                             type="checkbox"
                             checked={stockFilter}
                             onChange={(event) =>
-                                setStockFilter(event.target.checked)
+                                setStockFilter(
+                                    event.target.checked
+                                )
                             }
                         />
+
                         Только товары с небольшим остатком
+
                     </label>
 
                     {stockFilter && (
                         <label>
                             Максимальный доступный остаток SKU
+
                             <input
                                 name="max_stock"
                                 type="number"
@@ -395,20 +554,28 @@ export default function CampaignEditor731({
                         </label>
                     )}
 
+                    {/* OLD STOCK FILTER */}
+
                     <label className="pricing73-check">
+
                         <input
                             type="checkbox"
                             checked={oldFilter}
                             onChange={(event) =>
-                                setOldFilter(event.target.checked)
+                                setOldFilter(
+                                    event.target.checked
+                                )
                             }
                         />
+
                         Только давно не продававшиеся товары
+
                     </label>
 
                     {oldFilter && (
                         <label>
                             Без продаж, дней
+
                             <input
                                 name="unsold_days"
                                 type="number"
@@ -424,10 +591,16 @@ export default function CampaignEditor731({
                         Подбор выполняется по активным SKU с назначенной
                         ценой. Перечень фиксируется при создании акции.
                     </p>
+
                 </section>
 
+                {/* EXCLUDED PRODUCTS */}
+
                 <section className="crm65-panel pricing73-panel">
-                    <h2>Исключения</h2>
+
+                    <h2>
+                        Исключения
+                    </h2>
 
                     <p className="crm65-muted">
                         Выбранные здесь SKU не получат скидку.
@@ -437,32 +610,44 @@ export default function CampaignEditor731({
                         scope="variant"
                         selected={excluded}
                         disabled={disabled}
-                        onChange={(items) => {
+                        onChange={(items: ScopeOption[]) => {
                             setExcluded(items);
                             invalidate();
                         }}
                     />
+
                 </section>
 
+                {/* PROMO AND LOYALTY COMPATIBILITY */}
+
                 <section className="crm65-panel pricing73-panel">
-                    <h2>Совместимость скидок</h2>
+
+                    <h2>
+                        Совместимость скидок
+                    </h2>
 
                     <label className="pricing73-check">
+
                         <input
                             name="allow_promo"
                             type="checkbox"
                             defaultChecked={false}
                         />
+
                         Разрешить дополнительный промокод
+
                     </label>
 
                     <label className="pricing73-check">
+
                         <input
                             name="allow_loyalty"
                             type="checkbox"
                             defaultChecked
                         />
+
                         Разрешить оплату бонусами
+
                     </label>
 
                     <p className="crm65-muted">
@@ -470,19 +655,37 @@ export default function CampaignEditor731({
                         политике лояльности. При запрете промокода
                         купон не применяется ко всей смешанной корзине.
                     </p>
+
                 </section>
 
-                <button className="crm65-secondary">
+                <button
+                    type="submit"
+                    className="crm65-secondary"
+                    disabled={disabled}
+                >
                     {loading
                         ? "Подбираем товары..."
                         : "Предварительный просмотр"}
                 </button>
+
             </fieldset>
 
-            {error && <p className="crm65-error" role="alert">{error}</p>}
+            {/* ERRORS */}
+
+            {error && (
+                <p
+                    className="crm65-error"
+                    role="alert"
+                >
+                    {error}
+                </p>
+            )}
+
+            {/* CAMPAIGN PREVIEW */}
 
             {preview && (
                 <section className="crm65-panel pricing73-panel">
+
                     <h2>
                         Подобрано SKU: {preview.result.count}
                     </h2>
@@ -494,7 +697,9 @@ export default function CampaignEditor731({
                     </p>
 
                     <div className="pricing73-table-scroll">
+
                         <table className="pricing73-table">
+
                             <thead>
                             <tr>
                                 <th>Товар / SKU</th>
@@ -505,16 +710,23 @@ export default function CampaignEditor731({
                             </thead>
 
                             <tbody>
+
                             {preview.result.sample.map((item) => (
                                 <tr key={item.id}>
+
                                     <td>
                                         <strong>
                                             {item.product_name ?? "Товар"}
                                         </strong>
-                                        <small>{item.sku}</small>
+
+                                        <small>
+                                            {item.sku}
+                                        </small>
                                     </td>
 
-                                    <td>{item.available_qty}</td>
+                                    <td>
+                                        {item.available_qty}
+                                    </td>
 
                                     <td>
                                             <span className="pricing73-old-price">
@@ -531,36 +743,54 @@ export default function CampaignEditor731({
                                             preview.result.minor_units
                                         )}
                                     </td>
+
                                 </tr>
                             ))}
+
                             </tbody>
+
                         </table>
+
                     </div>
 
                     {preview.result.count === 0 && (
                         <p className="crm65-error">
-                            Подходящих товаров нет. Измените условия.
+                            Подходящих товаров нет.
+                            Измените условия.
                         </p>
                     )}
 
+                    {/* SAVE CAMPAIGN */}
+
                     <div className="pricing73-savebar">
+
                         <strong>
-                            {preview.result.count} SKU ·{" "}
+                            {preview.result.count} SKU
+                            {" · "}
                             {preview.result.currency_code}
                         </strong>
 
                         <button
                             type="button"
                             className="crm65-primary"
-                            disabled={disabled || preview.result.count === 0}
+                            disabled={
+                                disabled
+                                || preview.result.count === 0
+                            }
                             onClick={() => {
-                                if (!window.confirm(
-                                    `Создать акцию для ${preview.result.count} SKU?`
-                                )) return;
+                                if (
+                                    !window.confirm(
+                                        `Создать акцию для ${preview.result.count} SKU?`
+                                    )
+                                ) {
+                                    return;
+                                }
 
                                 submit({
                                     action: "campaign_create",
+
                                     ...preview.terms,
+
                                     preview_token:
                                     preview.result.preview_token,
                                 });
@@ -568,7 +798,9 @@ export default function CampaignEditor731({
                         >
                             Создать акцию
                         </button>
+
                     </div>
+
                 </section>
             )}
 
@@ -580,6 +812,7 @@ export default function CampaignEditor731({
             >
                 Закрыть редактор
             </button>
+
         </form>
     );
 }

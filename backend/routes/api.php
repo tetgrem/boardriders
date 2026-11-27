@@ -1454,3 +1454,63 @@ Route::middleware(['auth:sanctum'])
             ->middleware('throttle:20,1')
             ->name('campaign731.toggle');
     });
+
+
+// ============================================================
+// BOARDRIDERS BLOCK 74 — CUSTOMER CRM
+// ============================================================
+
+Route::middleware(['auth:sanctum'])
+    ->prefix('v1/admin/crm74')
+    ->group(function (): void {
+        $controller =
+            \App\Http\Controllers\Api\Crm74CustomersController::class;
+
+        Route::get('/overview', [$controller, 'overview'])
+            ->middleware('throttle:30,1')
+            ->name('crm74.overview');
+
+        Route::get('/customers', [$controller, 'index'])
+            ->middleware('throttle:60,1')
+            ->name('crm74.customers.index');
+
+        Route::get(
+            '/customers/{customerId}',
+            [$controller, 'show']
+        )
+            ->whereNumber('customerId')
+            ->middleware('throttle:60,1')
+            ->name('crm74.customers.show');
+
+        Route::post(
+            '/customers/{customerId}/write',
+            [$controller, 'write']
+        )
+            ->whereNumber('customerId')
+            ->middleware('throttle:20,1')
+            ->name('crm74.customers.write');
+
+        Route::get(
+            '/customers/{customerId}/wallets/{walletId}/ledger',
+            [$controller, 'ledger']
+        )
+            ->whereNumber('customerId')
+            ->whereNumber('walletId')
+            ->middleware('throttle:60,1')
+            ->name('crm74.customers.ledger');
+
+        Route::get(
+            '/customers/{customerId}/{section}',
+            [$controller, 'section']
+        )
+            ->whereNumber('customerId')
+            ->whereIn('section', [
+                'orders',
+                'returns',
+                'wallets',
+                'history',
+                'access',
+            ])
+            ->middleware('throttle:60,1')
+            ->name('crm74.customers.section');
+    });

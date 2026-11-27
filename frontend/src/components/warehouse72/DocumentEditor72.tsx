@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import { crm } from "@/lib/crm65/client";
+import LiveSearch from "@/components/crm65/LiveSearch";
 
 import {
     documentLabels,
@@ -379,31 +380,18 @@ export default function DocumentEditor72({
                     <h2>Добавить товары</h2>
 
                     <div className="warehouse72-search">
-                        <input
+                        <LiveSearch
                             value={query}
-                            maxLength={64}
+                            applied={search}
+                            onChange={setQuery}
+                            disabled={disabled}
                             placeholder="Название, SKU или штрихкод"
-                            onChange={(event) => setQuery(event.target.value)}
-                            onKeyDown={(event) => {
-                                if (event.key === "Enter") {
-                                    event.preventDefault();
-                                    setCursor(null);
-                                    setSearch(query.trim());
-                                }
+                            onSearch={(value) => {
+                                setSearch(value);
+                                setCursor(null);
+                                setError(null);
                             }}
                         />
-
-                        <button
-                            type="button"
-                            className="crm65-secondary"
-                            disabled={loading}
-                            onClick={() => {
-                                setCursor(null);
-                                setSearch(query.trim());
-                            }}
-                        >
-                            Найти
-                        </button>
                     </div>
 
                     {loading && (

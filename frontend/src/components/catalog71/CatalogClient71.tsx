@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { crm, CrmError } from "@/lib/crm65/client";
 import Directories71 from "./Directories71";
 import { catalogSlug71 } from "./catalogSlug71";
+import LiveSearch from "@/components/crm65/LiveSearch";
 import ProductEditor71, {
     Panel,
     submitForm,
@@ -46,6 +47,7 @@ export default function CatalogClient71() {
     const [editorReset, setEditorReset] = useState(0);
 
     const [query, setQuery] = useState("");
+    const [draftQuery, setDraftQuery] = useState("");
     const [newName, setNewName] = useState("");
     const [status, setStatus] = useState("all");
     const [cursor, setCursor] = useState<number | null>(null);
@@ -170,6 +172,7 @@ export default function CatalogClient71() {
             setNewName("");
 
             setQuery("");
+            setDraftQuery("");
             setStatus("all");
             setCursor(null);
             setPrevious([]);
@@ -337,37 +340,41 @@ export default function CatalogClient71() {
                         </Panel>
 
                         <Panel title="Товары">
-                            <form
-                                className="catalog71-form"
-                                onSubmit={(event) => submitForm(event, (form) => {
-                                    setQuery(textValue(form, "q"));
-                                    setStatus(textValue(form, "status"));
-                                    setCursor(null);
-                                    setPrevious([]);
-                                    reloadList();
-                                })}
-                            >
+                            <div className="catalog71-form">
                                 <label>
                                     Поиск
-                                    <input name="q" maxLength={64}
-                                           placeholder="Название, бренд или SKU"/>
+                                    <LiveSearch
+                                        value={draftQuery}
+                                        applied={query}
+                                        onChange={setDraftQuery}
+                                        placeholder="Название, бренд или SKU"
+                                        onSearch={(value) => {
+                                            setQuery(value);
+                                            setCursor(null);
+                                            setPrevious([]);
+                                            reloadList();
+                                        }}
+                                    />
                                 </label>
 
                                 <label>
                                     Статус
-                                    <select name="status" defaultValue="all">
+                                    <select
+                                        name="status"
+                                        value={status}
+                                        onChange={(event) => {
+                                            setStatus(event.target.value);
+                                            setCursor(null);
+                                            setPrevious([]);
+                                        }}
+                                    >
                                         <option value="all">Все</option>
                                         <option value="draft">Черновики</option>
                                         <option value="active">Активные</option>
                                         <option value="archived">Архивные</option>
                                     </select>
                                 </label>
-
-                                <button className="crm65-secondary"
-                                        disabled={busy || loading}>
-                                    Найти товары
-                                </button>
-                            </form>
+                            </div>
 
                             {loading && (
                                 <p className="crm65-muted">Загружаем каталог...</p>
