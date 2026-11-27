@@ -26,13 +26,15 @@ final class     Crm65Staff
         'catalog71.manage',
         'warehouse72.view',
         'warehouse72.manage',
+        'pricing73.view',
+        'pricing73.manage',
     ];
 
     private const ROLES = [
-        'owner' => [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
-        'manager' => [0, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13],
+        'owner' => [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        'manager' => [0, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14],
         'support' => [0, 3, 5, 6, 7, 8, 12],
-        'finance' => [0, 1, 3, 4, 5, 7, 12],
+        'finance' => [0, 1, 3, 4, 5, 7, 12, 14, 15],
         'fiscal' => [0, 2, 3, 4, 7],
         'viewer' => [0, 7],
     ];

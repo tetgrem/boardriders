@@ -80,7 +80,7 @@ class PromotionService
             )
 
             ->join(
-                'variant_prices as vp',
+                'effective_variant_prices731 as vp',
                 function ($join) use ($priceList) {
                     $join
                         ->on(
@@ -116,6 +116,7 @@ class PromotionService
             ->select(
                 'v.id',
                 'vp.price_minor',
+                'vp.allow_promo',
                 'stock.available_qty'
             )
 
@@ -127,6 +128,7 @@ class PromotionService
         // ========================================
 
         $subtotal = 0;
+        $blockedByCampaign = false;
 
         foreach ($items as $item) {
 
@@ -171,8 +173,18 @@ class PromotionService
             }
 
             $subtotal += $unitPrice * $quantity;
-        }
 
+            if (!(bool) $variant->allow_promo) {
+                $blockedByCampaign = true;
+            }
+        }
+        if ($blockedByCampaign) {
+            return $this->invalid(
+                'automatic_campaign_blocks_promo',
+                $subtotal,
+                $currency
+            );
+        }
         if ($subtotal === 0) {
             return $this->invalid(
                 'empty_subtotal',

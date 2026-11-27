@@ -157,6 +157,16 @@ class ProductCatalogController extends Controller
                             : (int) $v->compare_at_minor,
                     'currency' => $v->currency_code,
                 ],
+                'campaign' => $v->campaign_id === null
+                    ? null
+                    : [
+                        'id' => (int) $v->campaign_id,
+                        'name' => $v->campaign_name,
+                        'badge' => $v->campaign_badge,
+                        'ends_at' => $v->campaign_ends_at,
+                        'base_price_minor' =>
+                            (int) $v->base_price_minor,
+                    ],
                 'stock' => [
                     'available' => max(
                         0,
@@ -356,6 +366,8 @@ class ProductCatalogController extends Controller
                 'b.slug as brand_slug',
                 'c.id as category_id',
                 'summary.min_price_minor',
+                'summary.min_compare_at_minor',
+                'summary.campaign_badge',
                 'summary.currency_code',
                 'summary.available_qty',
                 'cover.path as cover_path',
@@ -396,6 +408,18 @@ class ProductCatalogController extends Controller
                 'MIN(vp.price_minor) AS min_price_minor'
             )
             ->selectRaw(
+                '(ARRAY_AGG(
+                    vp.compare_at_minor
+                    ORDER BY vp.price_minor ASC, v.id ASC
+                ))[1] AS min_compare_at_minor'
+            )
+            ->selectRaw(
+                '(ARRAY_AGG(
+                    vp.campaign_badge
+                    ORDER BY vp.price_minor ASC, v.id ASC
+                ))[1] AS campaign_badge'
+            )
+            ->selectRaw(
                 'MIN(pl.currency_code) AS currency_code'
             )
             ->selectRaw(
@@ -415,7 +439,7 @@ class ProductCatalogController extends Controller
 
         return DB::table('product_variants as v')
             ->join(
-                'variant_prices as vp',
+                'effective_variant_prices731 as vp',
                 'vp.variant_id',
                 '=',
                 'v.id'
@@ -456,6 +480,11 @@ class ProductCatalogController extends Controller
                 'v.sort_order',
                 'vp.price_minor',
                 'vp.compare_at_minor',
+                'vp.base_price_minor',
+                'vp.campaign_id',
+                'vp.campaign_name',
+                'vp.campaign_badge',
+                'vp.campaign_ends_at',
                 'pl.currency_code',
             ])
             ->selectRaw(
@@ -484,8 +513,22 @@ class ProductCatalogController extends Controller
             'price_from' => [
                 'amount_minor' =>
                     (int) $row->min_price_minor,
+
+                ...($row->min_compare_at_minor === null
+                    ? []
+                    : [
+                        'compare_at_minor' =>
+                            (int) $row->min_compare_at_minor,
+                    ]),
+
                 'currency' => $row->currency_code,
             ],
+
+            ...($row->campaign_badge === null
+                ? []
+                : [
+                    'campaign_badge' => $row->campaign_badge,
+                ]),
             'stock' => [
                 'available' => max(
                     0,

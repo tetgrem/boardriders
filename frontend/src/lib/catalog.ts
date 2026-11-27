@@ -39,6 +39,7 @@ export type ProductSummary = {
         alt: string;
     } | null;
     price_from: Money;
+    campaign_badge?: string;
     stock: Stock;
 };
 
@@ -47,6 +48,15 @@ export type ProductVariant = {
     sku: string;
     barcode: string | null;
     price: Money;
+
+    campaign?: {
+        id: number;
+        name: string;
+        badge: string;
+        ends_at: string;
+        base_price_minor: number;
+    } | null;
+
     stock: Stock;
     size_eu: {
         system: "EU";

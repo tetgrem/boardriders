@@ -210,7 +210,7 @@ final class CheckoutPricingPreviewService
             )
 
             ->join(
-                'variant_prices as vp',
+                'effective_variant_prices731 as vp',
                 function ($join) use ($priceList) {
                     $join
                         ->on(
@@ -251,6 +251,10 @@ final class CheckoutPricingPreviewService
                 'v.id',
                 'vp.price_minor',
                 'vp.revision',
+                'vp.base_price_minor',
+                'vp.campaign_id',
+                'vp.allow_promo',
+                'vp.allow_loyalty',
                 's.available_qty'
             )
 
@@ -263,6 +267,7 @@ final class CheckoutPricingPreviewService
 
         $lines = [];
         $revisions = [];
+        $automaticCampaigns = [];
 
         foreach ($items as $item) {
             $id = $item['variant_id'];
@@ -306,11 +311,23 @@ final class CheckoutPricingPreviewService
                 // Бонуси — тільки за серверними
                 // правилами допуску товарів.
                 'loyalty_eligible' =>
-                    isset($approved[$id]),
+                    isset($approved[$id])
+                    && (bool) $variant->allow_loyalty,
             ];
 
             $revisions[$id] =
                 (int) $variant->revision;
+
+            if ($variant->campaign_id !== null) {
+                $automaticCampaigns[] = [
+                    'variant_id' => $id,
+                    'campaign_id' =>
+                        (int) $variant->campaign_id,
+                    'base_unit_price_minor' =>
+                        (int) $variant->base_price_minor,
+                    'effective_unit_price_minor' => $price,
+                ];
+            }
         }
 
         // ========================================
@@ -521,6 +538,10 @@ final class CheckoutPricingPreviewService
             'lines' => $final['lines'],
 
             'price_revisions' => $revisions,
+
+            ...($automaticCampaigns === [] ? [] : [
+                'automatic_campaigns' => $automaticCampaigns,
+            ]),
 
             'promotion' => $promotion,
 

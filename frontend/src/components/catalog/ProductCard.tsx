@@ -91,7 +91,10 @@ export default function ProductCard({
 
                 {onSale && (
                     <span className="absolute bottom-0 left-0 flex h-[25px] min-w-[55px] items-center justify-center bg-[#C4C4C4] px-2 text-[14px] font-medium leading-none text-black">
-            -{discount}%
+                        {product.campaign_badge
+                            ? `${product.campaign_badge} · `
+                            : ""}
+                        -{discount}%
           </span>
                 )}
             </div>

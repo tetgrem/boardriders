@@ -103,6 +103,19 @@ export default function CrmFrame({ staff, children }: {
                 ▣ <span>Складское управление</span>
               </Link>
           )}
+          {staff.abilities.includes("pricing73.view") && (
+              <Link
+                  href="/admin/pricing"
+                  onClick={() => setMenu(false)}
+                  className={
+                    pathname.startsWith("/admin/pricing")
+                        ? "active"
+                        : ""
+                  }
+              >
+                ◈ <span>Цены и маркетинг</span>
+              </Link>
+          )}
         </nav>
         <div className="crm65-sidebar-bottom">
           <p className="crm65-sidebar-hint">Финансовые и фискальные операции доступны только на чтение. Все действия учитываются сервером.</p>

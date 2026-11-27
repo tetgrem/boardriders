@@ -60,6 +60,10 @@ export default function ProductDetailView({
     const price =
         selectedVariant?.price ?? product.price_from;
 
+    const campaignBadge = selectedVariant
+        ? selectedVariant.campaign?.badge
+        : product.campaign_badge;
+
     const stock =
         selectedVariant?.stock ?? product.stock;
 
@@ -183,7 +187,11 @@ export default function ProductDetailView({
               <span className="text-[30px] font-semibold leading-tight sm:text-[32px]">
                 {money(price.amount_minor)}
               </span>
-
+                            {campaignBadge && (
+                                <span className="rounded-sm bg-[#111111] px-3 py-1.5 text-[12px] font-semibold text-white">
+                                    {campaignBadge}
+                                </span>
+                            )}
                             {price.compare_at_minor != null &&
                                 price.compare_at_minor > price.amount_minor && (
                                     <span className="text-[18px] text-[#828B8D] line-through">

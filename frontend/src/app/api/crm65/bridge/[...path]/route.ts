@@ -6,10 +6,68 @@ import { allowedOrigin, laravel, readSession } from "@/lib/crm65/session";
 type Context = { params: Promise<{ path: string[] }> };
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const allowedFilters = new Set([
-  "limit", "before_id", "order_key", "payment_status", "has_rma", "has_fiscal_issue", "scope", "status", "priority", "filter", "category", "unread", "page", "q", "warehouse_id", "stock_status", "kind"
+  "limit", "before_id", "order_key", "payment_status", "has_rma", "has_fiscal_issue", "scope", "status", "priority", "filter", "category", "unread", "page", "q", "warehouse_id", "stock_status", "kind", "price_list_id", "price_status", "scope_type"
 ]);
 
 function route(path: string[], method: "GET" | "POST"): string | null {
+  if (path[0] === "pricing" && path[1] === "campaigns") {
+    if (method === "GET" && path.length === 2) {
+      return "pricing73/campaigns";
+    }
+
+    if (
+        method === "GET"
+        && path.length === 4
+        && /^[1-9]\d{0,15}$/.test(path[2] ?? "")
+        && path[3] === "variants"
+    ) {
+      return `pricing73/campaigns/${path[2]}/variants`;
+    }
+
+    if (
+        method === "POST"
+        && path.length === 3
+        && ["preview", "create", "toggle"].includes(path[2])
+    ) {
+      return `pricing73/campaigns/${path[2]}`;
+    }
+
+    return null;
+  }
+  if (path[0] === "pricing") {
+    if (
+        method === "GET"
+        && path.length === 2
+        && [
+          "overview",
+          "prices",
+          "promotions",
+          "scopes",
+          "history"
+        ].includes(path[1])
+    ) {
+      return `pricing73/${path[1]}`;
+    }
+
+    if (
+        method === "GET"
+        && path.length === 3
+        && ["promotions", "policies"].includes(path[1])
+        && /^[1-9]\d{0,15}$/.test(path[2])
+    ) {
+      return `pricing73/${path[1]}/${path[2]}`;
+    }
+
+    if (
+        method === "POST"
+        && path.length === 2
+        && path[1] === "submit"
+    ) {
+      return "pricing73/submit";
+    }
+
+    return null;
+  }
   if (path[0] === "warehouse") {
     if (
         method === "GET"
@@ -215,7 +273,11 @@ async function proxy(request: Request, context: Context, method: "GET" | "POST")
             ? 6_000_000
             : path.startsWith("catalog71/directories/")
                 ? 100_000
-                : path === "warehouse72/submit"
+                : (
+                    path === "warehouse72/submit"
+                    || path === "pricing73/submit"
+                    || path.startsWith("pricing73/campaigns/")
+                )
                     ? 64_000
                     : 1600;
 
@@ -235,6 +297,7 @@ async function proxy(request: Request, context: Context, method: "GET" | "POST")
       || path.startsWith("crm70/")
       || path.startsWith("catalog71/")
       || path.startsWith("warehouse72/")
+      || path.startsWith("pricing73/")
           ? path
           : `crm64/${path}`;
   try {
@@ -262,6 +325,7 @@ async function proxy(request: Request, context: Context, method: "GET" | "POST")
           (
               path.startsWith("catalog71/")
               || path.startsWith("warehouse72/")
+              || path.startsWith("pricing73/")
           )
           && status === 409
       ) {

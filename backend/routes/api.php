@@ -1379,3 +1379,78 @@ Route::middleware(['auth:sanctum'])
             ->middleware('throttle:60,1')
             ->name('warehouse72.listing');
     });
+
+
+// ============================================================
+// BOARDRIDERS BLOCK 73 — PRICING, PROMOTIONS AND LOYALTY
+// ============================================================
+
+Route::middleware(['auth:sanctum'])
+    ->prefix('v1/admin/pricing73')
+    ->group(function (): void {
+        $controller =
+            \App\Http\Controllers\Api\Pricing73Controller::class;
+
+        Route::get('/overview', [$controller, 'overview'])
+            ->middleware('throttle:60,1')
+            ->name('pricing73.overview');
+
+        Route::post('/submit', [$controller, 'submit'])
+            ->middleware('throttle:20,1')
+            ->name('pricing73.submit');
+
+        Route::get('/promotions/{promotionId}', [$controller, 'promotion'])
+            ->whereNumber('promotionId')
+            ->middleware('throttle:60,1')
+            ->name('pricing73.promotion');
+
+        Route::get('/policies/{marketId}', [$controller, 'policies'])
+            ->whereNumber('marketId')
+            ->middleware('throttle:60,1')
+            ->name('pricing73.policies');
+
+        Route::get('/{section}', [$controller, 'listing'])
+            ->whereIn('section', [
+                'prices',
+                'promotions',
+                'scopes',
+                'history',
+            ])
+            ->middleware('throttle:60,1')
+            ->name('pricing73.listing');
+    });
+
+// ============================================================
+// BOARDRIDERS BLOCK 73.1 — AUTOMATIC MARKETING CAMPAIGNS
+// ============================================================
+
+Route::middleware(['auth:sanctum'])
+    ->prefix('v1/admin/pricing73/campaigns')
+    ->group(function (): void {
+        $controller =
+            \App\Http\Controllers\Api\Campaign731Controller::class;
+
+        Route::get('/', [$controller, 'index'])
+            ->middleware('throttle:60,1')
+            ->name('campaign731.index');
+
+        Route::get(
+            '/{campaignId}/variants',
+            [$controller, 'variants']
+        )
+            ->whereNumber('campaignId')
+            ->middleware('throttle:60,1')
+            ->name('campaign731.variants');
+
+        Route::post('/preview', [$controller, 'preview'])
+            ->middleware('throttle:20,1')
+            ->name('campaign731.preview');
+
+        Route::post('/create', [$controller, 'create'])
+            ->middleware('throttle:10,1')
+            ->name('campaign731.create');
+
+        Route::post('/toggle', [$controller, 'toggle'])
+            ->middleware('throttle:20,1')
+            ->name('campaign731.toggle');
+    });

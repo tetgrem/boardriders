@@ -435,6 +435,89 @@ final class CheckoutFinancialSnapshotBuilder
             'lines' => $lines,
         ];
 
+        // Preserve the automatic campaign decision without
+        // changing historical snapshots that had no campaign.
+        if (array_key_exists('automatic_campaigns', $quote)) {
+            $campaigns = $quote['automatic_campaigns'];
+
+            if (!is_array($campaigns)
+                || !array_is_list($campaigns)
+                || count($campaigns) > count($lines)) {
+                throw new InvalidArgumentException(
+                    'Invalid automatic campaign snapshot'
+                );
+            }
+
+            $lineMap = array_column(
+                $lines,
+                null,
+                'variant_id'
+            );
+
+            $seenCampaignVariants = [];
+            $campaignSnapshot = [];
+
+            foreach ($campaigns as $campaign) {
+                if (!is_array($campaign)) {
+                    throw new InvalidArgumentException(
+                        'Invalid campaign entry'
+                    );
+                }
+
+                $variantId = $this->positive(
+                    $campaign,
+                    'variant_id'
+                );
+
+                $campaignId = $this->positive(
+                    $campaign,
+                    'campaign_id'
+                );
+
+                $basePrice = $this->amount(
+                    $campaign,
+                    'base_unit_price_minor'
+                );
+
+                $effectivePrice = $this->amount(
+                    $campaign,
+                    'effective_unit_price_minor'
+                );
+
+                if (
+                    isset($seenCampaignVariants[$variantId])
+                    || !isset($lineMap[$variantId])
+                    || $basePrice <= $effectivePrice
+                    || $lineMap[$variantId]['unit_price_minor']
+                    !== $effectivePrice
+                ) {
+                    throw new DomainException(
+                        'Campaign and financial line price mismatch'
+                    );
+                }
+
+                $seenCampaignVariants[$variantId] = true;
+
+                $campaignSnapshot[] = [
+                    'variant_id' => $variantId,
+                    'campaign_id' => $campaignId,
+                    'base_unit_price_minor' => $basePrice,
+                    'effective_unit_price_minor' => $effectivePrice,
+                ];
+            }
+
+            if ($campaignSnapshot !== []) {
+                usort(
+                    $campaignSnapshot,
+                    static fn (array $a, array $b): int =>
+                        $a['variant_id'] <=> $b['variant_id']
+                );
+
+                $snapshot['automatic_campaigns'] =
+                    $campaignSnapshot;
+            }
+        }
+
         try {
             $json = json_encode(
                 $snapshot,

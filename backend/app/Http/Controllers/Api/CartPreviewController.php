@@ -70,7 +70,7 @@ class CartPreviewController extends Controller
             })
 
             ->join(
-                'variant_prices as vp',
+                'effective_variant_prices731 as vp',
                 'vp.variant_id',
                 '=',
                 'v.id'
@@ -100,6 +100,12 @@ class CartPreviewController extends Controller
                 'img.alt_uk',
                 'img.alt_ru',
                 'vp.price_minor',
+                'vp.compare_at_minor',
+                'vp.base_price_minor',
+                'vp.campaign_id',
+                'vp.campaign_name',
+                'vp.campaign_badge',
+                'vp.campaign_ends_at',
                 'pl.currency_code',
                 'st.available_qty',
             ])
@@ -214,8 +220,25 @@ class CartPreviewController extends Controller
 
                     'price' => [
                         'amount_minor' => (int) $row->price_minor,
+
+                        'compare_at_minor' =>
+                            $row->compare_at_minor === null
+                                ? null
+                                : (int) $row->compare_at_minor,
+
                         'currency' => $row->currency_code,
                     ],
+
+                    'campaign' => $row->campaign_id === null
+                        ? null
+                        : [
+                            'id' => (int) $row->campaign_id,
+                            'name' => $row->campaign_name,
+                            'badge' => $row->campaign_badge,
+                            'ends_at' => $row->campaign_ends_at,
+                            'base_price_minor' =>
+                                (int) $row->base_price_minor,
+                        ],
 
                     'stock' => [
                         'available' => $qty,

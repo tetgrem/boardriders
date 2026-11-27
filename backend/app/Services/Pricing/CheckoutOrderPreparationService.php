@@ -171,7 +171,11 @@ final class CheckoutOrderPreparationService
             ) {
                 throw new DomainException('Incompatible market or price list');
             }
-
+            // Campaign administration and order preparation
+            // must not modify/read campaign decisions concurrently.
+            DB::select(
+                'SELECT pg_advisory_xact_lock_shared(730073)'
+            );
             // Утримуємо блокування цін до COMMIT.
             $locked = DB::table('variant_prices')
                 ->where('price_list_id', $list->id)

@@ -100,7 +100,7 @@ class CatalogController extends Controller
                 'v.product_id'
             )
             ->join(
-                'variant_prices as price',
+                'effective_variant_prices731 as price',
                 'price.variant_id',
                 '=',
                 'v.id'
@@ -145,6 +145,11 @@ class CatalogController extends Controller
                 'v.sku',
                 'price.price_minor',
                 'price.compare_at_minor',
+                'price.base_price_minor',
+                'price.campaign_id',
+                'price.campaign_name',
+                'price.campaign_badge',
+                'price.campaign_ends_at',
                 'list.currency_code',
             ])
             ->selectRaw(
@@ -168,7 +173,16 @@ class CatalogController extends Controller
 
                 'currency' => $item->currency_code,
             ],
-
+            'campaign' => $item->campaign_id === null
+                ? null
+                : [
+                    'id' => (int) $item->campaign_id,
+                    'name' => $item->campaign_name,
+                    'badge' => $item->campaign_badge,
+                    'ends_at' => $item->campaign_ends_at,
+                    'base_price_minor' =>
+                        (int) $item->base_price_minor,
+                ],
             'stock' => [
                 'available' => max(
                     0,
